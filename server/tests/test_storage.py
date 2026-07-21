@@ -1,3 +1,5 @@
+import subprocess
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -5,9 +7,19 @@ import pytest
 from server.storage import AlreadyExists, NotFound, Vault, VaultError
 
 
+def _init_git_repo_with_commit(repo: Path, message: str) -> None:
+    repo.mkdir(exist_ok=True)
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+    (repo / "train.py").write_text("print('hi')\n")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", message], cwd=repo, check=True)
+
+
 @pytest.fixture
 def vault(tmp_path: Path) -> Vault:
-    for bucket in ("research", "experiments", "resources"):
+    for bucket in ("research", "experiments", "resources", "progress"):
         (tmp_path / bucket).mkdir()
     (tmp_path / "log.md").write_text("")
     return Vault(tmp_path)
@@ -161,6 +173,30 @@ def test_get_context_for_research_includes_experiments_resources_and_flags(vault
     assert "Origin paper." in context
 
 
+def test_get_context_for_research_surfaces_logged_notes_and_findings(vault: Vault):
+    vault.start_research("Sparse Attention", aim="Make attention sub-quadratic.")
+    vault.log_brainstorm("Sparse Attention", "Maybe top-k works?")
+    vault.log_brainstorm(
+        "Sparse Attention", "Deep-research findings: Linformer achieves O(n) via low-rank projection."
+    )
+
+    context = vault.get_context("Sparse Attention")
+    assert "Maybe top-k works?" in context
+    assert "Linformer achieves O(n)" in context
+    assert "Notes & Findings" in context
+
+
+def test_get_context_omits_older_notes_beyond_last_three(vault: Vault):
+    vault.start_research("Sparse Attention", aim="...")
+    for i in range(5):
+        vault.log_brainstorm("Sparse Attention", f"note {i}")
+
+    context = vault.get_context("Sparse Attention")
+    assert "note 4" in context and "note 3" in context and "note 2" in context
+    assert "note 0" not in context
+    assert "earlier note(s) omitted" in context
+
+
 def test_reindex_groups_experiments_by_status(vault: Vault):
     vault.start_research("Sparse Attention", aim="...")
     e1 = vault.start_experiment("Sparse Attention", title="Attempt A", aim="...", setup="...")
@@ -169,3 +205,61 @@ def test_reindex_groups_experiments_by_status(vault: Vault):
     vault.update_experiment(e2["id"], status="failed", attempt_notes="broken", metrics=[])
     index = (vault.root / "experiments" / "index.md").read_text()
     assert "done" in index and "failed" in index
+
+
+def test_weekly_progress_includes_tracker_activity_and_persists_report(vault: Vault):
+    vault.start_research("Sparse Attention", aim="...")
+    exp = vault.start_experiment("Sparse Attention", title="Baseline", aim="...", setup="...")
+    vault.update_experiment(exp["id"], status="done", attempt_notes="works", metrics=[])
+    vault.add_resource("child2019generating", title="Generating Long Sequences")
+
+    report = vault.weekly_progress()
+
+    assert "sparse-attention" in report
+    assert exp["id"] in report
+    assert "child2019generating" in report
+
+    report_path = vault.root / "progress" / f"{date.today().isoformat()}.md"
+    assert report_path.exists()
+    index = (vault.root / "progress" / "index.md").read_text()
+    assert "Week ending" in index
+
+
+def test_weekly_progress_scans_linked_repo_and_flags_undocumented_commits(vault: Vault):
+    repo = vault.root / "external_repo"
+    _init_git_repo_with_commit(repo, "initial baseline run")
+
+    vault.start_research("Sparse Attention", aim="...")
+    exp = vault.start_experiment("Sparse Attention", title="Baseline", aim="...", setup="...")
+    vault.link_code(exp["id"], repo_path=str(repo))
+
+    report = vault.weekly_progress()
+
+    assert "initial baseline run" in report
+    assert exp["id"] in report
+    assert "was not called" in report  # no update_experiment attempt logged despite the commit
+
+
+def test_weekly_progress_does_not_flag_when_attempt_was_logged(vault: Vault):
+    repo = vault.root / "external_repo"
+    _init_git_repo_with_commit(repo, "converges now")
+
+    vault.start_research("Sparse Attention", aim="...")
+    exp = vault.start_experiment("Sparse Attention", title="Baseline", aim="...", setup="...")
+    vault.link_code(exp["id"], repo_path=str(repo))
+    vault.update_experiment(
+        exp["id"], status="done", attempt_notes="converges", metrics=[{"name": "val_ppl", "value": 10.0, "attempt": 1}]
+    )
+
+    report = vault.weekly_progress()
+    assert "converges now" in report
+    assert "was not called" not in report
+
+
+def test_weekly_progress_handles_missing_repo_path_gracefully(vault: Vault):
+    vault.start_research("Sparse Attention", aim="...")
+    exp = vault.start_experiment("Sparse Attention", title="Baseline", aim="...", setup="...")
+    vault.link_code(exp["id"], repo_path=str(vault.root / "does-not-exist"))
+
+    report = vault.weekly_progress()
+    assert "repo path not found" in report

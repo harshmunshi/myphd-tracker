@@ -7,6 +7,7 @@ MYPHD_TRACKER_ROOT for testing against a scratch vault.
 
 from __future__ import annotations
 
+import datetime as dt
 import os
 from pathlib import Path
 from typing import Optional
@@ -18,21 +19,55 @@ from server.storage import Vault
 DEFAULT_ROOT = Path(__file__).resolve().parent.parent
 VAULT_ROOT = Path(os.environ.get("MYPHD_TRACKER_ROOT", DEFAULT_ROOT))
 
-mcp = FastMCP("myphd-tracker")
+mcp = FastMCP(
+    "myphd-tracker",
+    instructions=(
+        "This server is a lab-journal/tracker, not a research assistant — it never searches "
+        "the web or reads papers itself. Whenever the user starts talking about a new research "
+        "idea or topic (even phrased as 'I want to research X' or 'let's look into X'), call "
+        "track_research_topic to create the durable journal entry BEFORE doing anything else — "
+        "including before running any separate literature-search/deep-research pass. Logging the "
+        "topic here and actually researching it are two different, non-exclusive actions: do "
+        "both if the user wants both, but always log first. CRITICALLY: whenever you finish "
+        "actually investigating a tracked topic — a deep-research pass, web search, reading a "
+        "paper, or any other research work — you MUST summarize the key findings and call "
+        "log_research_note on that topic before you finish responding. Do not let findings live "
+        "only in the chat transcript. A tracker that only records 'I started thinking about X' "
+        "and never what was learned has no value — the findings are the entire point. Likewise, "
+        "once code is being written for an idea, call start_experiment, and log every subsequent "
+        "run via update_experiment "
+        "whether it succeeds or fails. When the user wants to resume prior work ('let's work on "
+        "research A'), call get_context first. When the user asks for a weekly summary/status "
+        "update, or what they got done recently, call weekly_progress — it also inspects git "
+        "history in any linked code repo, so it can surface real coding activity even if the "
+        "researcher forgot to log an update_experiment call for it."
+    ),
+)
 vault = Vault(VAULT_ROOT)
 
 
-@mcp.tool()
+@mcp.tool(name="track_research_topic")
 def start_research(topic: str, aim: str, background: str = "") -> dict:
-    """Start a new research topic page under research/. Use when brainstorming a new idea
-    from scratch, before any code exists."""
+    """Create a tracked journal entry for a new research idea/topic (NOT a literature search —
+    this records that you're starting to think about a topic so it can be resumed later; it
+    performs no research itself). Call this whenever the user begins, brainstorms, or wants to
+    track a new research topic, even if their phrasing sounds like a request to go research it
+    ('I want to do research on X', 'let's look into X') — that phrasing usually means both track
+    it AND (optionally, separately) investigate it. Always call this one first regardless. If you
+    do go on to investigate, call log_research_note afterward with a summary of what you found —
+    otherwise those findings are lost the moment the chat ends."""
     return vault.start_research(topic, aim, background)
 
 
-@mcp.tool()
+@mcp.tool(name="log_research_note")
 def log_brainstorm(topic_ref: str, note: str) -> dict:
-    """Append a dated brainstorming note to an existing research topic (by slug, title, or
-    alias)."""
+    """Append a dated note to an existing research topic (by slug, title, or alias) — this is
+    THE mechanism for persisting anything learned about a topic: brainstormed ideas, AND
+    (critically) findings/summaries from any research or investigation you just performed
+    (deep-research pass, web search, reading a paper). Call this every time you finish
+    investigating a tracked topic, summarizing what you found — otherwise the findings only
+    exist in the chat transcript and the tracker has recorded nothing of value. get_context
+    surfaces the most recent notes logged here when resuming work on a topic."""
     return vault.log_brainstorm(topic_ref, note)
 
 
@@ -99,6 +134,21 @@ def get_context(ref: str) -> str:
     status and current best, linked resources, and recent activity. Call this first whenever
     the user asks to resume or continue existing work."""
     return vault.get_context(ref)
+
+
+@mcp.tool()
+def weekly_progress(since: Optional[str] = None, until: Optional[str] = None) -> str:
+    """Generate a weekly progress digest and persist it under progress/. Defaults to the last
+    7 days ending today; pass since/until as ISO dates ('YYYY-MM-DD') for a different range.
+    Pulls together everything that happened in the tracker (research brainstorming, experiment
+    attempts, resource additions) AND raw git commit activity in any repo linked via link_code —
+    so coding work shows up here even if the researcher never called update_experiment for every
+    run. Flags any linked repo with commits this week that weren't reflected in a logged attempt,
+    so worked-on-but-undocumented progress doesn't get silently lost. Call this whenever the user
+    asks for a weekly summary/status update, or wants to see what they got done."""
+    since_date = dt.date.fromisoformat(since) if since else None
+    until_date = dt.date.fromisoformat(until) if until else None
+    return vault.weekly_progress(since_date, until_date)
 
 
 def main() -> None:

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import datetime as dt
 import re
+import subprocess
 from pathlib import Path
 from typing import Optional
 
@@ -19,6 +20,7 @@ from server.models import (
     Experiment,
     MetricRecord,
     PAGE_MODELS,
+    ProgressReport,
     Resource,
     ResearchTopic,
     atomic_write,
@@ -30,7 +32,12 @@ from server.models import (
     slugify,
 )
 
-BUCKET_TITLES = {"research": "Research", "experiments": "Experiments", "resources": "Resources"}
+BUCKET_TITLES = {
+    "research": "Research",
+    "experiments": "Experiments",
+    "resources": "Resources",
+    "progress": "Progress",
+}
 
 
 class VaultError(Exception):
@@ -48,6 +55,7 @@ class AlreadyExists(VaultError):
 # --- body section helpers (light text-splice, not a full markdown AST) ------
 
 _ATTEMPT_HEADING_RE = re.compile(r"^### (Attempt \d+.*)$", re.MULTILINE)
+_DATED_NOTE_HEADING_RE = re.compile(r"^### \d{4}-\d{2}-\d{2}$", re.MULTILINE)
 
 
 def _section_bounds(body: str, heading: str) -> Optional[tuple[list[str], int, int]]:
@@ -106,6 +114,19 @@ def _extract_section(body: str, heading: str) -> str:
 
 def _extract_attempts(body: str) -> list[str]:
     matches = list(_ATTEMPT_HEADING_RE.finditer(body))
+    blocks = []
+    for i, m in enumerate(matches):
+        start = m.start()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(body)
+        blocks.append(body[start:end].strip())
+    return blocks
+
+
+def _extract_dated_notes(body: str) -> list[str]:
+    """Notes appended by log_research_note (### YYYY-MM-DD headings) — the running record of
+    brainstorming and research findings on a topic. get_context must surface these, not just
+    the static Aim/Background sections, or anything logged after topic creation is invisible."""
+    matches = list(_DATED_NOTE_HEADING_RE.finditer(body))
     blocks = []
     for i, m in enumerate(matches):
         start = m.start()
@@ -175,6 +196,8 @@ class Vault:
         pages = [p for p, _ in load_bucket(self._bucket_dir(bucket), model_cls)]
         if bucket == "resources":
             content = render_index(BUCKET_TITLES[bucket], pages, sort_key=lambda p: p.created)
+        elif bucket == "progress":
+            content = render_index(BUCKET_TITLES[bucket], pages, sort_key=lambda p: p.week_end)
         else:
             content = render_index(
                 BUCKET_TITLES[bucket],
@@ -367,6 +390,144 @@ class Vault:
             self._mutate(bucket, ident, "annotation appended")
             return {"bucket": bucket, "id": ident}
 
+    # --- weekly progress -------------------------------------------------------
+
+    def _log_lines_in_range(self, week_start: dt.date, week_end: dt.date) -> list[str]:
+        log_path = self.root / "log.md"
+        if not log_path.exists():
+            return []
+        lines = []
+        for line in log_path.read_text().splitlines():
+            if not line.strip() or line.startswith("<!--"):
+                continue
+            try:
+                line_date = dt.date.fromisoformat(line[:10])
+            except ValueError:
+                continue
+            if week_start <= line_date <= week_end:
+                lines.append(line)
+        return lines
+
+    def _git_log_since(self, repo_path: str, week_start: dt.date, week_end: dt.date) -> list[str]:
+        path = Path(repo_path).expanduser()
+        if not path.exists():
+            return [f"(repo path not found: {repo_path})"]
+        try:
+            result = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(path),
+                    "log",
+                    f"--since={week_start.isoformat()}",
+                    f"--until={(week_end + dt.timedelta(days=1)).isoformat()}",
+                    "--oneline",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError) as e:
+            return [f"(could not read git history at {repo_path}: {e})"]
+        if result.returncode != 0:
+            return [f"(not a git repo or git error at {repo_path}: {result.stderr.strip()})"]
+        return [line for line in result.stdout.splitlines() if line.strip()]
+
+    def _scan_linked_code_repos(
+        self, week_start: dt.date, week_end: dt.date, experiment_log_lines: list[str]
+    ) -> list[dict]:
+        activity = []
+        for exp, _ in load_bucket(self._bucket_dir("experiments"), Experiment):
+            if not exp.code_ref or not exp.code_ref.path:
+                continue
+            commits = self._git_log_since(exp.code_ref.path, week_start, week_end)
+            # Deliberately keyed off log.md "attempt ... logged" entries, not exp.updated —
+            # link_code/status-only updates also bump `updated`, which would otherwise mask
+            # the exact gap (code changed, no attempt logged) this flag exists to catch.
+            attempt_logged = any(
+                f"[experiments:{exp.id}]" in line and "attempt" in line for line in experiment_log_lines
+            )
+            activity.append(
+                {
+                    "experiment_id": exp.id,
+                    "repo_path": exp.code_ref.path,
+                    "commits": commits,
+                    "attempt_logged_this_week": attempt_logged,
+                }
+            )
+        return activity
+
+    def _render_weekly_progress(
+        self,
+        week_start: dt.date,
+        week_end: dt.date,
+        research_lines: list[str],
+        experiment_lines: list[str],
+        resource_lines: list[str],
+        code_activity: list[dict],
+    ) -> str:
+        lines = [f"# Weekly Progress: {week_start.isoformat()} to {week_end.isoformat()}", ""]
+
+        lines.append("## Research activity")
+        lines.extend(research_lines or ["_none logged this week_"])
+
+        lines.append("\n## Experiment activity")
+        lines.extend(experiment_lines or ["_none logged this week_"])
+
+        lines.append("\n## Resource activity")
+        lines.extend(resource_lines or ["_none logged this week_"])
+
+        lines.append("\n## Code activity (linked repos)")
+        if not code_activity:
+            lines.append("_no experiments have linked code repos yet — use link_code_")
+        for entry in code_activity:
+            commits = [c for c in entry["commits"] if not c.startswith("(")]
+            errors = [c for c in entry["commits"] if c.startswith("(")]
+            lines.append(f"\n### {entry['experiment_id']} — {entry['repo_path']}")
+            lines.extend(errors)
+            if not commits and not errors:
+                lines.append("_no commits this week_")
+            else:
+                lines.extend(f"- {c}" for c in commits)
+            if commits and not entry["attempt_logged_this_week"]:
+                lines.append(
+                    f"**Note:** code changed this week but `update_experiment` was not called "
+                    f"for {entry['experiment_id']} — consider logging what happened."
+                )
+
+        return "\n".join(lines) + "\n"
+
+    def weekly_progress(
+        self, since: Optional[dt.date] = None, until: Optional[dt.date] = None
+    ) -> str:
+        with self._lock:
+            today = dt.date.today()
+            week_end = until or today
+            week_start = since or (week_end - dt.timedelta(days=7))
+
+            log_lines = self._log_lines_in_range(week_start, week_end)
+            research_lines = [line for line in log_lines if "[research:" in line]
+            experiment_lines = [line for line in log_lines if "[experiments:" in line]
+            resource_lines = [line for line in log_lines if "[resources:" in line]
+            code_activity = self._scan_linked_code_repos(week_start, week_end, experiment_lines)
+
+            body = self._render_weekly_progress(
+                week_start, week_end, research_lines, experiment_lines, resource_lines, code_activity
+            )
+
+            report_id = week_end.isoformat()
+            model = ProgressReport(
+                id=report_id,
+                title=f"Week ending {report_id}",
+                week_start=week_start,
+                week_end=week_end,
+                created=today,
+            )
+            path = self._page_path("progress", report_id)
+            atomic_write(path, dump_page(model, body))
+            self._mutate("progress", report_id, f"report generated ({week_start}–{week_end})")
+            return body
+
     # --- get_context ---------------------------------------------------------
 
     def _recent_log_lines(self, refs: set[str], limit: int = 10) -> list[str]:
@@ -388,6 +549,8 @@ class Vault:
             return self._context_for_research(ident)
         if bucket == "experiments":
             return self._context_for_experiment(ident)
+        if bucket == "progress":
+            return self._context_for_progress(ident)
         return self._context_for_resource(ident)
 
     def _context_for_research(self, ident: str) -> str:
@@ -411,6 +574,16 @@ class Vault:
         background = _extract_section(topic_body, "Background")
         if background:
             lines += ["## Background", background, ""]
+
+        notes = _extract_dated_notes(topic_body)
+        if notes:
+            lines.append("## Notes & Findings")
+            shown_notes = notes[-3:]
+            omitted_notes = len(notes) - len(shown_notes)
+            if omitted_notes > 0:
+                lines.append(f"_{omitted_notes} earlier note(s) omitted — ask for the full history if needed._")
+            lines.extend(shown_notes)
+            lines.append("")
 
         flags = [
             f"- BLOCKED: {exp.id}" for exp, _ in experiments if exp.status == "blocked"
@@ -487,3 +660,7 @@ class Vault:
     def _context_for_resource(self, ident: str) -> str:
         res, body = parse_page(self._page_path("resources", ident), Resource)
         return f"# {res.title} ({res.citekey})\n\n{body}"
+
+    def _context_for_progress(self, ident: str) -> str:
+        report, body = parse_page(self._page_path("progress", ident), ProgressReport)
+        return f"# {report.title}\n\n{body}"

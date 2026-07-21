@@ -117,10 +117,22 @@ class Resource(BaseModel):
     created: date
 
 
+class ProgressReport(BaseModel):
+    """A regenerable weekly digest — unlike research/experiment/resource pages, re-running
+    weekly_progress for the same week overwrites its report rather than appending to it."""
+
+    id: str
+    title: str
+    week_start: date
+    week_end: date
+    created: date
+
+
 PAGE_MODELS: dict[str, type[BaseModel]] = {
     "research": ResearchTopic,
     "experiments": Experiment,
     "resources": Resource,
+    "progress": ProgressReport,
 }
 
 

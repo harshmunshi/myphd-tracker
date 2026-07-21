@@ -18,6 +18,8 @@ experiments/<experiment-id>.md  one page per experiment
 experiments/index.md            GENERATED
 resources/<citekey>.md          one page per paper/resource
 resources/index.md              GENERATED — this IS the bibliography, there is no separate file
+progress/<week-ending-date>.md  one page per weekly digest, id = ISO date of the week's last day
+progress/index.md               GENERATED
 log.md                          single root append-only log, greppable, tags every line by bucket+ref
 dashboard/                      generated static HTML site (build_dashboard output) — never hand-edit
 server/                         the MCP server implementation
@@ -114,6 +116,21 @@ created: YYYY-MM-DD
 ```
 Body: freeform annotation — why this paper matters, what it's cited for.
 
+### Progress report (`progress/<week-ending-date>.md`)
+```yaml
+id: <week-ending-date>   # e.g. 2026-07-21 — also the filename
+title: <string>          # e.g. "Week ending 2026-07-21"
+week_start: YYYY-MM-DD
+week_end: YYYY-MM-DD
+created: YYYY-MM-DD
+```
+Unlike every other page type, this one is **regenerable, not append-only** — calling
+`weekly_progress` again for the same week overwrites its report rather than accumulating history.
+It's a digest of `log.md` activity across all buckets for the date range, plus raw `git log`
+activity in any repo linked via `code_ref`, so real coding work shows up here even when
+`update_experiment` wasn't called for every run — the tool flags that gap explicitly rather than
+silently missing it.
+
 ## Naming
 
 - Slugs: lowercase, hyphen-separated, no special characters (`sparse-attention`, not `Sparse Attention!`).
@@ -134,6 +151,19 @@ just a `grep`:
 ### Scene A — starting from scratch
 1. Brainstorming with Claude (Desktop or CLI) → create/update a page under `research/` (aim,
    background, running notes). Nothing goes under `experiments/` yet.
+
+   **Disambiguation:** "I want to do research on X" / "let's look into X" is ambiguous — it can
+   mean "track this as a topic" (call `track_research_topic`) and/or "go investigate X for me"
+   (a literature search / deep-research pass). These are different, non-exclusive actions. Track
+   the topic first, regardless of whether a separate investigation also happens — don't let the
+   phrase get absorbed entirely into a research/deep-research skill and skip the tracker.
+
+   **Do not stop there.** If an investigation *does* happen — a deep-research pass, a web search,
+   reading a paper — the tracker is worthless unless the findings make it back in. Summarize what
+   was learned and call `log_research_note` on the topic before ending the turn. A page that only
+   ever says "started thinking about X" and never records what was found is not a lab journal,
+   it's a to-do list. `get_context` only surfaces what was actually logged this way — findings
+   that stay in the chat transcript are invisible to every future session.
 2. When the user moves to actually writing/running code (Claude Code or any tool) → create an
    `experiments/` page referencing the research topic via `research_refs`. From here on, every
    run/attempt — success or failure — gets appended as a new `### Attempt N` block. Do not wait
@@ -158,6 +188,14 @@ each linked experiment's status + current best + last 1-2 attempts, linked resou
 annotation snippets, and recent relevant `log.md` lines. Surface any `blocked` or
 `origin: backfilled, verified: false` items first — those are what the user needs to see before
 diving back in.
+
+### Weekly progress
+When asked for a status update, a weekly summary, or "what did I get done," call `weekly_progress`
+rather than trying to reconstruct it from memory — it aggregates `log.md` across all buckets for
+the date range AND inspects `git log` in every repo linked via `code_ref`, so it reflects research,
+experiments, *and* raw coding activity even when the user never explicitly logged a given run.
+Read its output for any "not reflected" flag (code changed but no `update_experiment` call this
+week) and proactively offer to log those runs properly rather than letting them stay undocumented.
 
 ## Non-goals
 
