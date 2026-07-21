@@ -1,0 +1,171 @@
+from pathlib import Path
+
+import pytest
+
+from server.storage import AlreadyExists, NotFound, Vault, VaultError
+
+
+@pytest.fixture
+def vault(tmp_path: Path) -> Vault:
+    for bucket in ("research", "experiments", "resources"):
+        (tmp_path / bucket).mkdir()
+    (tmp_path / "log.md").write_text("")
+    return Vault(tmp_path)
+
+
+def test_start_research_creates_page_and_index(vault: Vault):
+    result = vault.start_research("Sparse Attention", aim="Make attention sub-quadratic.")
+    assert result == {"bucket": "research", "id": "sparse-attention"}
+
+    page = (vault.root / "research" / "sparse-attention.md").read_text()
+    assert "Make attention sub-quadratic." in page
+
+    index = (vault.root / "research" / "index.md").read_text()
+    assert "Sparse Attention" in index
+    assert "do not hand-edit" in index
+
+    log = (vault.root / "log.md").read_text()
+    assert "[research:sparse-attention]" in log
+
+
+def test_duplicate_start_research_raises(vault: Vault):
+    vault.start_research("Sparse Attention", aim="...")
+    with pytest.raises(AlreadyExists):
+        vault.start_research("Sparse Attention", aim="...")
+
+
+def test_log_brainstorm_appends_note(vault: Vault):
+    vault.start_research("Sparse Attention", aim="...")
+    vault.log_brainstorm("Sparse Attention", "Maybe top-k works?")
+    page = (vault.root / "research" / "sparse-attention.md").read_text()
+    assert "Maybe top-k works?" in page
+
+
+def test_start_experiment_links_research_and_disambiguates_collisions(vault: Vault):
+    vault.start_research("Sparse Attention", aim="...")
+    e1 = vault.start_experiment("Sparse Attention", title="Baseline", aim="...", setup="...")
+    e2 = vault.start_experiment("Sparse Attention", title="Baseline", aim="...", setup="...")
+    assert e1["id"] != e2["id"]
+    assert e2["id"].endswith("-2")
+
+    page = (vault.root / "experiments" / f"{e1['id']}.md").read_text()
+    assert "research_refs" in page
+    assert "sparse-attention" in page
+
+
+def test_start_experiment_requires_research_ref(vault: Vault):
+    with pytest.raises(NotFound):
+        vault.start_experiment("nonexistent-topic", title="x", aim="x", setup="x")
+
+
+def test_update_experiment_append_only_attempt_grammar(vault: Vault):
+    vault.start_research("Sparse Attention", aim="...")
+    exp = vault.start_experiment("Sparse Attention", title="Baseline", aim="...", setup="batch=8")
+
+    vault.update_experiment(
+        exp["id"],
+        status="failed",
+        attempt_notes="OOM at seq_len 4096",
+        metrics=[{"name": "val_ppl", "value": 14.2, "attempt": 1}],
+    )
+    vault.update_experiment(
+        exp["id"],
+        status="running",
+        setup_delta="reduced batch size to 4",
+        attempt_notes="converges, still memory bound",
+        metrics=[{"name": "val_ppl", "value": 12.1, "attempt": 2}],
+    )
+
+    vault.update_experiment(
+        exp["id"],
+        status="done",
+        attempt_notes="memory-bound but stable, good enough",
+        metrics=[{"name": "val_ppl", "value": 11.8, "attempt": 3}],
+    )
+
+    body = (vault.root / "experiments" / f"{exp['id']}.md").read_text()
+    assert "Attempt 1" in body and "Attempt 2" in body and "Attempt 3" in body
+    assert "OOM at seq_len 4096" in body
+    assert "reduced batch size to 4" in body
+    assert body.count("### Attempt") == 3
+    assert "val_ppl=11.8" in body
+    # Current best must stay the single trailing section, after all three attempt blocks
+    assert body.count("## Current best") == 1
+    assert body.rindex("### Attempt 3") < body.rindex("## Current best")
+
+    result = vault.update_experiment(exp["id"])
+    assert result["latest_attempt"] == 3
+    assert result["status"] == "done"
+
+
+def test_update_experiment_no_attempt_when_no_notes_or_metrics(vault: Vault):
+    vault.start_research("Sparse Attention", aim="...")
+    exp = vault.start_experiment("Sparse Attention", title="Baseline", aim="...", setup="...")
+    vault.update_experiment(exp["id"], status="blocked")
+    body = (vault.root / "experiments" / f"{exp['id']}.md").read_text()
+    assert "### Attempt" not in body
+    assert "status: blocked" in body
+
+
+def test_link_code_sets_code_ref(vault: Vault):
+    vault.start_research("Sparse Attention", aim="...")
+    exp = vault.start_experiment("Sparse Attention", title="Baseline", aim="...", setup="...")
+    vault.link_code(exp["id"], repo_path="/code/topk-attn", commit_sha="a1b2c3d", dirty=True)
+    body = (vault.root / "experiments" / f"{exp['id']}.md").read_text()
+    assert "a1b2c3d" in body
+    assert "dirty: true" in body
+
+
+def test_add_resource_and_annotate(vault: Vault):
+    vault.add_resource("child2019generating", title="Generating Long Sequences", annotation="Sparse attn origin.")
+    vault.annotate_resource("child2019generating", "Re-read section 3.2.")
+    body = (vault.root / "resources" / "child2019generating.md").read_text()
+    assert "Sparse attn origin." in body
+    assert "Re-read section 3.2." in body
+    index = (vault.root / "resources" / "index.md").read_text()
+    assert "Generating Long Sequences" in index
+
+
+def test_resolve_by_alias_and_title_and_bucket_ref(vault: Vault):
+    vault.start_research("Sparse Attention", aim="...")
+    assert vault.resolve("sparse attention") == ("research", "sparse-attention")
+    assert vault.resolve("research:sparse-attention") == ("research", "sparse-attention")
+    with pytest.raises(NotFound):
+        vault.resolve("does not exist")
+
+
+def test_get_context_for_research_includes_experiments_resources_and_flags(vault: Vault):
+    vault.start_research("Sparse Attention", aim="Make attention sub-quadratic.")
+    vault.add_resource("child2019generating", title="Generating Long Sequences", annotation="Origin paper.")
+    exp = vault.start_experiment("Sparse Attention", title="Baseline", aim="...", setup="...")
+    vault.update_experiment(
+        exp["id"],
+        status="blocked",
+        attempt_notes="OOM",
+        metrics=[{"name": "val_ppl", "value": 14.2, "attempt": 1}],
+    )
+    # link the resource manually via direct page edit to simulate resource_refs
+    from server.models import Experiment, parse_page, dump_page
+
+    path = vault.root / "experiments" / f"{exp['id']}.md"
+    model, body = parse_page(path, Experiment)
+    model.resource_refs = ["child2019generating"]
+    path.write_text(dump_page(model, body))
+    vault._rebuild_alias_cache()
+
+    context = vault.get_context("Sparse Attention")
+    assert "Make attention sub-quadratic." in context
+    assert exp["id"] in context
+    assert "BLOCKED" in context
+    assert "child2019generating" in context
+    assert "Origin paper." in context
+
+
+def test_reindex_groups_experiments_by_status(vault: Vault):
+    vault.start_research("Sparse Attention", aim="...")
+    e1 = vault.start_experiment("Sparse Attention", title="Attempt A", aim="...", setup="...")
+    e2 = vault.start_experiment("Sparse Attention", title="Attempt B", aim="...", setup="...")
+    vault.update_experiment(e1["id"], status="done", attempt_notes="works", metrics=[])
+    vault.update_experiment(e2["id"], status="failed", attempt_notes="broken", metrics=[])
+    index = (vault.root / "experiments" / "index.md").read_text()
+    assert "done" in index and "failed" in index
