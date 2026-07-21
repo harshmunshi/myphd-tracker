@@ -12,7 +12,7 @@ import re
 import tempfile
 from datetime import date
 from pathlib import Path
-from typing import Callable, Literal, Optional
+from typing import Callable, Literal, Optional, TypeVar
 
 import frontmatter
 import yaml
@@ -144,7 +144,10 @@ def _page_ident(page: BaseModel) -> str:
 # --- frontmatter <-> markdown ----------------------------------------------
 
 
-def parse_page(path: Path, model_cls: type[BaseModel]) -> tuple[BaseModel, str]:
+PageModel = TypeVar("PageModel", bound=BaseModel)
+
+
+def parse_page(path: Path, model_cls: type[PageModel]) -> tuple[PageModel, str]:
     post = frontmatter.loads(Path(path).read_text())
     model = model_cls.model_validate(post.metadata)
     return model, post.content
@@ -156,7 +159,7 @@ def dump_page(model: BaseModel, body: str) -> str:
     return frontmatter.dumps(post) + "\n"
 
 
-def load_bucket(bucket_dir: Path, model_cls: type[BaseModel]) -> list[tuple[BaseModel, str]]:
+def load_bucket(bucket_dir: Path, model_cls: type[PageModel]) -> list[tuple[PageModel, str]]:
     bucket_dir = Path(bucket_dir)
     pages = []
     for path in sorted(bucket_dir.glob("*.md")):

@@ -96,3 +96,58 @@ def test_build_dashboard_is_idempotent_full_rebuild(vault: Vault):
     first = build_dashboard(vault.root)
     second = build_dashboard(vault.root)
     assert {p.name for p in first} == {p.name for p in second}
+
+
+def test_topic_page_renders_background_and_dated_notes(vault: Vault):
+    vault.start_research("Sparse Attention", aim="Make attention sub-quadratic.", background="Quadratic scaling hurts.")
+    vault.log_brainstorm("Sparse Attention", "Looked into Longformer and Reformer today.")
+
+    build_dashboard(vault.root)
+
+    topic_page = (vault.root / "dashboard" / "topics" / "sparse-attention.html").read_text()
+    assert "Quadratic scaling hurts" in topic_page
+    assert "Longformer and Reformer" in topic_page
+
+
+def test_topic_page_renders_full_attempt_history(vault: Vault):
+    vault.start_research("Sparse Attention", aim="...")
+    exp = vault.start_experiment("Sparse Attention", title="Baseline", aim="...", setup="...")
+    vault.update_experiment(exp["id"], status="failed", attempt_notes="ran out of memory on attempt one")
+    vault.update_experiment(exp["id"], status="running", attempt_notes="fixed batch size for attempt two")
+
+    build_dashboard(vault.root)
+
+    topic_page = (vault.root / "dashboard" / "topics" / "sparse-attention.html").read_text()
+    assert "ran out of memory on attempt one" in topic_page
+    assert "fixed batch size for attempt two" in topic_page
+
+
+def test_resource_gets_its_own_page_linked_from_bibliography(vault: Vault):
+    vault.add_resource(
+        "child2019generating",
+        title="Generating Long Sequences",
+        authors=["Child"],
+        annotation="Cited for the sparse-factorization trick in section 3.",
+    )
+
+    build_dashboard(vault.root)
+
+    bib = (vault.root / "dashboard" / "bibliography.html").read_text()
+    assert 'href="resources/child2019generating.html"' in bib
+
+    resource_page = (vault.root / "dashboard" / "resources" / "child2019generating.html").read_text()
+    assert "sparse-factorization trick" in resource_page
+
+
+def test_progress_report_gets_its_own_page_linked_from_index(vault: Vault):
+    vault.start_research("Sparse Attention", aim="...")
+    vault.weekly_progress()
+
+    build_dashboard(vault.root)
+
+    index = (vault.root / "dashboard" / "index.html").read_text()
+    assert 'href="progress/' in index
+
+    report_pages = list((vault.root / "dashboard" / "progress").glob("*.html"))
+    assert len(report_pages) == 1
+    assert "Weekly Progress" in report_pages[0].read_text()
