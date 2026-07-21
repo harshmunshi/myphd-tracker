@@ -8,7 +8,6 @@ conventions this implements.
 from __future__ import annotations
 
 import datetime as dt
-import re
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -26,9 +25,13 @@ from server.models import (
     atomic_write,
     dump_page,
     experiment_id,
+    extract_attempts,
+    extract_dated_notes,
+    extract_section,
     load_bucket,
     parse_page,
     render_index,
+    section_bounds,
     slugify,
 )
 
@@ -52,29 +55,13 @@ class AlreadyExists(VaultError):
     pass
 
 
-# --- body section helpers (light text-splice, not a full markdown AST) ------
-
-_ATTEMPT_HEADING_RE = re.compile(r"^### (Attempt \d+.*)$", re.MULTILINE)
-_DATED_NOTE_HEADING_RE = re.compile(r"^### \d{4}-\d{2}-\d{2}$", re.MULTILINE)
-
-
-def _section_bounds(body: str, heading: str) -> Optional[tuple[list[str], int, int]]:
-    lines = body.split("\n")
-    heading_line = f"## {heading}"
-    try:
-        idx = lines.index(heading_line)
-    except ValueError:
-        return None
-    end = len(lines)
-    for i in range(idx + 1, len(lines)):
-        if lines[i].startswith("## ") or lines[i].startswith("### "):
-            end = i
-            break
-    return lines, idx, end
+# --- body mutation helpers (light text-splice, not a full markdown AST) -----
+# Read-only parsing (section_bounds, extract_section/attempts/dated_notes) lives in
+# models.py, shared with dashboard/render.py — these three only ever mutate.
 
 
 def _append_under_heading(body: str, heading: str, text: str) -> str:
-    bounds = _section_bounds(body, heading)
+    bounds = section_bounds(body, heading)
     if bounds is None:
         return body.rstrip("\n") + f"\n\n## {heading}\n{text}\n"
     lines, idx, end = bounds
@@ -96,43 +83,12 @@ def _insert_before_heading_or_end(body: str, heading: str, text: str) -> str:
 
 
 def _replace_section(body: str, heading: str, text: str) -> str:
-    bounds = _section_bounds(body, heading)
+    bounds = section_bounds(body, heading)
     if bounds is None:
         return body.rstrip("\n") + f"\n\n## {heading}\n{text}\n"
     lines, idx, end = bounds
     new_lines = lines[: idx + 1] + [text.rstrip("\n"), ""] + lines[end:]
     return "\n".join(new_lines)
-
-
-def _extract_section(body: str, heading: str) -> str:
-    bounds = _section_bounds(body, heading)
-    if bounds is None:
-        return ""
-    lines, idx, end = bounds
-    return "\n".join(lines[idx + 1 : end]).strip()
-
-
-def _extract_attempts(body: str) -> list[str]:
-    matches = list(_ATTEMPT_HEADING_RE.finditer(body))
-    blocks = []
-    for i, m in enumerate(matches):
-        start = m.start()
-        end = matches[i + 1].start() if i + 1 < len(matches) else len(body)
-        blocks.append(body[start:end].strip())
-    return blocks
-
-
-def _extract_dated_notes(body: str) -> list[str]:
-    """Notes appended by log_research_note (### YYYY-MM-DD headings) — the running record of
-    brainstorming and research findings on a topic. get_context must surface these, not just
-    the static Aim/Background sections, or anything logged after topic creation is invisible."""
-    matches = list(_DATED_NOTE_HEADING_RE.finditer(body))
-    blocks = []
-    for i, m in enumerate(matches):
-        start = m.start()
-        end = matches[i + 1].start() if i + 1 < len(matches) else len(body)
-        blocks.append(body[start:end].strip())
-    return blocks
 
 
 def _metrics_block(metrics: list[MetricRecord]) -> str:
@@ -568,14 +524,14 @@ class Vault:
         recent_log = self._recent_log_lines(refs)
 
         lines = [f"# {topic.title}", f"_status: {topic.status}_", ""]
-        aim = _extract_section(topic_body, "Aim")
+        aim = extract_section(topic_body, "Aim")
         if aim:
             lines += ["## Aim", aim, ""]
-        background = _extract_section(topic_body, "Background")
+        background = extract_section(topic_body, "Background")
         if background:
             lines += ["## Background", background, ""]
 
-        notes = _extract_dated_notes(topic_body)
+        notes = extract_dated_notes(topic_body)
         if notes:
             lines.append("## Notes & Findings")
             shown_notes = notes[-3:]
@@ -599,8 +555,8 @@ class Vault:
         if not experiments:
             lines.append("_none yet_")
         for exp, body in sorted(experiments, key=lambda t: t[0].updated, reverse=True):
-            current_best = _extract_section(body, "Current best")
-            attempts = _extract_attempts(body)
+            current_best = extract_section(body, "Current best")
+            attempts = extract_attempts(body)
             lines.append(f"\n### {exp.id} ({exp.status}, updated {exp.updated})")
             if current_best:
                 lines.append(f"Current best: {current_best}")
@@ -631,16 +587,16 @@ class Vault:
         recent_log = self._recent_log_lines({ident})
 
         lines = [f"# {exp.id}", f"_status: {exp.status}, updated {exp.updated}_", ""]
-        aim = _extract_section(body, "Aim")
+        aim = extract_section(body, "Aim")
         if aim:
             lines += ["## Aim", aim, ""]
-        current_best = _extract_section(body, "Current best")
+        current_best = extract_section(body, "Current best")
         if current_best:
             lines += [f"Current best: {current_best}", ""]
         if exp.origin == "backfilled":
             lines.append(f"_origin: backfilled, verified: {exp.verified}_\n")
 
-        attempts = _extract_attempts(body)
+        attempts = extract_attempts(body)
         lines.append("## Attempts")
         lines.extend(attempts)
 

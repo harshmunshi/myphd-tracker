@@ -32,6 +32,7 @@ def test_expected_tools_are_registered(mcp_env):
         "annotate_resource",
         "get_context",
         "weekly_progress",
+        "build_dashboard",
     }
 
 

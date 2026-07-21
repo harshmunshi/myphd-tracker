@@ -197,6 +197,16 @@ experiments, *and* raw coding activity even when the user never explicitly logge
 Read its output for any "not reflected" flag (code changed but no `update_experiment` call this
 week) and proactively offer to log those runs properly rather than letting them stay undocumented.
 
+### Visualizing — `build_dashboard`
+A deterministic static-site generator (`server/dashboard/render.py`), not LLM-authored: it parses
+frontmatter/markdown directly and renders an overview page, one experiment-timeline page per
+research topic (status pill, attempt count, current best, a metric-trend sparkline), and a
+bibliography page, all under `dashboard/` with zero external dependencies — no CDN scripts, no
+client-side charting library, so it opens fully offline via `file://`. It's a full rebuild every
+call (stale pages for renamed/removed topics are deleted, not left behind), so call it any time —
+never hand-edit anything under `dashboard/`. Reach for this when the user wants to browse visually
+rather than read `get_context` in chat.
+
 ## Non-goals
 
 - No full-text-search-at-scale infrastructure (SQLite FTS5, embeddings). This is a solo-user vault

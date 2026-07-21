@@ -15,7 +15,8 @@ from pathlib import Path
 from typing import Callable, Literal, Optional
 
 import frontmatter
-from pydantic import BaseModel, Field
+import yaml
+from pydantic import BaseModel, Field, ValidationError
 
 # --- naming -------------------------------------------------------------
 
@@ -198,3 +199,76 @@ def render_index(
         out.append(f"\n## {label}\n")
         out.extend(f"- [{p.title}]({_page_ident(p)}.md)" for p in group_pages)
     return "\n".join(out) + "\n"
+
+
+# --- body parsing (read-only; light text-splice, not a full markdown AST) ---
+#
+# Shared by storage.py (get_context, mutation helpers) and dashboard/render.py — both read
+# the same body grammar (## sections, ### Attempt N blocks, ### <date> notes, ```metrics
+# fences), so the parsing lives here once rather than being reimplemented per consumer.
+
+ATTEMPT_HEADING_RE = re.compile(r"^### (Attempt \d+.*)$", re.MULTILINE)
+DATED_NOTE_HEADING_RE = re.compile(r"^### \d{4}-\d{2}-\d{2}$", re.MULTILINE)
+METRICS_BLOCK_RE = re.compile(r"```metrics\n(.*?)```", re.DOTALL)
+
+
+def section_bounds(body: str, heading: str) -> Optional[tuple[list[str], int, int]]:
+    lines = body.split("\n")
+    heading_line = f"## {heading}"
+    try:
+        idx = lines.index(heading_line)
+    except ValueError:
+        return None
+    end = len(lines)
+    for i in range(idx + 1, len(lines)):
+        if lines[i].startswith("## ") or lines[i].startswith("### "):
+            end = i
+            break
+    return lines, idx, end
+
+
+def extract_section(body: str, heading: str) -> str:
+    bounds = section_bounds(body, heading)
+    if bounds is None:
+        return ""
+    lines, idx, end = bounds
+    return "\n".join(lines[idx + 1 : end]).strip()
+
+
+def _extract_blocks(body: str, heading_re: re.Pattern) -> list[str]:
+    matches = list(heading_re.finditer(body))
+    blocks = []
+    for i, m in enumerate(matches):
+        start = m.start()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(body)
+        blocks.append(body[start:end].strip())
+    return blocks
+
+
+def extract_attempts(body: str) -> list[str]:
+    return _extract_blocks(body, ATTEMPT_HEADING_RE)
+
+
+def extract_dated_notes(body: str) -> list[str]:
+    """Notes appended by log_research_note (### YYYY-MM-DD headings) — the running record of
+    brainstorming and research findings on a topic. get_context must surface these, not just
+    the static Aim/Background sections, or anything logged after topic creation is invisible."""
+    return _extract_blocks(body, DATED_NOTE_HEADING_RE)
+
+
+def extract_metrics(body: str) -> list[MetricRecord]:
+    """Parse every ```metrics fenced block's records out of an experiment body. Each block's
+    content is a YAML flow-style list of mappings (the exact shape update_experiment writes),
+    so it round-trips through yaml.safe_load rather than needing a bespoke parser."""
+    records: list[MetricRecord] = []
+    for block in METRICS_BLOCK_RE.findall(body):
+        try:
+            parsed = yaml.safe_load(block) or []
+        except yaml.YAMLError:
+            continue
+        for item in parsed:
+            try:
+                records.append(MetricRecord(**item))
+            except (TypeError, ValidationError):
+                continue
+    return records

@@ -9,6 +9,9 @@ from server.models import (
     atomic_write,
     dump_page,
     experiment_id,
+    extract_attempts,
+    extract_metrics,
+    extract_section,
     parse_page,
     render_index,
     slugify,
@@ -103,3 +106,35 @@ def test_render_index_flat_no_group_key():
     b = ResearchTopic(id="b", title="B", created=date(2026, 7, 2), updated=date(2026, 7, 2))
     out = render_index("Research", [a, b], sort_key=lambda p: p.updated)
     assert out.index("(b.md)") < out.index("(a.md)")
+
+
+def test_extract_metrics_parses_fenced_blocks_across_multiple_attempts():
+    body = (
+        "## Aim\n...\n\n"
+        "### Attempt 1 — 2026-07-01 (failed)\n"
+        "```metrics\n- {name: val_ppl, value: 14.2, split: null, attempt: 1}\n```\n"
+        "Notes: OOM\n\n"
+        "### Attempt 2 — 2026-07-02 (done)\n"
+        "```metrics\n- {name: val_ppl, value: 11.8, split: val, attempt: 2}\n```\n"
+        "Notes: converges\n"
+    )
+    metrics = extract_metrics(body)
+    assert [(m.name, m.value, m.attempt) for m in metrics] == [
+        ("val_ppl", 14.2, 1),
+        ("val_ppl", 11.8, 2),
+    ]
+
+
+def test_extract_metrics_ignores_malformed_blocks():
+    body = "### Attempt 1 — 2026-07-01 (failed)\n```metrics\nnot: [valid, yaml: :\n```\nNotes: x\n"
+    assert extract_metrics(body) == []
+
+
+def test_extract_metrics_empty_when_no_blocks():
+    assert extract_metrics("## Aim\nno attempts yet\n") == []
+
+
+def test_extract_section_and_attempts_reexported_from_models():
+    body = "## Aim\nhello\n\n### Attempt 1 — 2026-07-01 (failed)\nNotes: x\n"
+    assert extract_section(body, "Aim") == "hello"
+    assert len(extract_attempts(body)) == 1

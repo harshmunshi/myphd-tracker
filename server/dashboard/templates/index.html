@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Overview — myphd-tracker{% endblock %}
+{% block content %}
+<h1>Research Overview</h1>
+
+{% if not topics %}
+<p class="muted">No research topics yet.</p>
+{% endif %}
+
+{% for t in topics %}
+<div class="card">
+  <h2><a href="topics/{{ t.id }}.html">{{ t.title }}</a> <span class="pill {{ t.status }}">{{ t.status }}</span></h2>
+  <p class="muted">updated {{ t.updated }} &middot; {{ t.experiment_count }} experiment(s)</p>
+  {% if t.aim %}<div>{{ t.aim_html|safe }}</div>{% endif %}
+</div>
+{% endfor %}
+
+<h2>Weekly progress reports</h2>
+{% if not reports %}
+<p class="muted">No weekly reports yet.</p>
+{% else %}
+<ul>
+{% for r in reports %}
+<li><a href="progress/{{ r.id }}.html">{{ r.title }}</a> ({{ r.week_start }} – {{ r.week_end }})</li>
+{% endfor %}
+</ul>
+{% endif %}
+
+<p class="muted">{{ resource_count }} resource(s) in the <a href="bibliography.html">bibliography</a>.</p>
+{% endblock %}

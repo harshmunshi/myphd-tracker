@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}{{ resource.citekey }} — myphd-tracker{% endblock %}
+{% block content %}
+<h1>{{ resource.title }}</h1>
+<p class="muted">
+  {{ resource.citekey }}
+  {% if resource.authors %}&middot; {{ resource.authors|join(", ") }}{% endif %}
+  {% if resource.tags %}&middot; tags: {{ resource.tags|join(", ") }}{% endif %}
+</p>
+{% if resource.path_or_url %}<p><a href="{{ resource.path_or_url }}">{{ resource.path_or_url }}</a></p>{% endif %}
+{% if resource.annotation_html %}
+{{ resource.annotation_html|safe }}
+{% else %}
+<p class="muted">No annotation yet.</p>
+{% endif %}
+{% endblock %}

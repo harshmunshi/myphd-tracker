@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}{{ topic.title }} — myphd-tracker{% endblock %}
+{% block content %}
+<h1>{{ topic.title }} <span class="pill {{ topic.status }}">{{ topic.status }}</span></h1>
+<p class="muted">updated {{ topic.updated }}</p>
+{% if topic.aim %}<h2>Aim</h2><div>{{ topic.aim_html|safe }}</div>{% endif %}
+{% if topic.background_html %}<h2>Background</h2><div>{{ topic.background_html|safe }}</div>{% endif %}
+
+{% if topic.notes_html %}
+<h2>Notes</h2>
+{% for note in topic.notes_html %}
+<div class="card">{{ note|safe }}</div>
+{% endfor %}
+{% endif %}
+
+<h2>Experiments</h2>
+{% if not topic.experiments %}
+<p class="muted">No experiments yet.</p>
+{% endif %}
+{% for e in topic.experiments %}
+<div class="card">
+  <h3>{{ e.title }} <span class="pill {{ e.status }}">{{ e.status }}</span></h3>
+  <p class="muted">
+    {{ e.id }} &middot; updated {{ e.updated }} &middot; {{ e.latest_attempt }} attempt(s)
+    {% if e.origin == "backfilled" %}&middot; backfilled{% if not e.verified %} (unverified){% endif %}{% endif %}
+  </p>
+  {% if e.current_best %}<p><strong>Current best:</strong> {{ e.current_best_html|safe }}</p>{% endif %}
+  {% for name, svg in e.sparklines.items() %}
+  <div>
+    <span class="muted">{{ name }}</span><br>
+    {{ svg|safe }}
+  </div>
+  {% endfor %}
+  {% if e.attempts_html %}
+  <details>
+    <summary>Attempt history ({{ e.attempts_html|length }}, most recent first)</summary>
+    {% for attempt in e.attempts_html %}
+    {{ attempt|safe }}
+    {% endfor %}
+  </details>
+  {% endif %}
+</div>
+{% endfor %}
+{% endblock %}

@@ -14,6 +14,7 @@ from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
 
+from server.dashboard.render import build_dashboard as render_dashboard
 from server.storage import Vault
 
 DEFAULT_ROOT = Path(__file__).resolve().parent.parent
@@ -40,7 +41,9 @@ mcp = FastMCP(
         "research A'), call get_context first. When the user asks for a weekly summary/status "
         "update, or what they got done recently, call weekly_progress — it also inspects git "
         "history in any linked code repo, so it can surface real coding activity even if the "
-        "researcher forgot to log an update_experiment call for it."
+        "researcher forgot to log an update_experiment call for it. When the user wants to "
+        "visually browse their research rather than read it in chat, call build_dashboard and "
+        "point them at dashboard/index.html — it's a fully offline static site, no server needed."
     ),
 )
 vault = Vault(VAULT_ROOT)
@@ -149,6 +152,19 @@ def weekly_progress(since: Optional[str] = None, until: Optional[str] = None) ->
     since_date = dt.date.fromisoformat(since) if since else None
     until_date = dt.date.fromisoformat(until) if until else None
     return vault.weekly_progress(since_date, until_date)
+
+
+@mcp.tool()
+def build_dashboard() -> dict:
+    """Regenerate the static HTML dashboard under dashboard/ from the current vault state — an
+    overview of all research topics with status, a per-topic experiment timeline (status,
+    attempt count, current best, a metric-trend sparkline), and a bibliography page. Fully
+    offline: no server or network needed, just open dashboard/index.html in a browser. This is
+    a deterministic rebuild from the vault's markdown/frontmatter, never LLM-authored — call it
+    whenever the user wants to visually browse their research/experiments rather than read
+    get_context in chat."""
+    written = render_dashboard(VAULT_ROOT)
+    return {"files_written": [str(p.relative_to(VAULT_ROOT)) for p in written]}
 
 
 def main() -> None:
