@@ -1,3 +1,4 @@
+import re
 import subprocess
 from datetime import date
 from pathlib import Path
@@ -27,7 +28,9 @@ def vault(tmp_path: Path) -> Vault:
 
 def test_start_research_creates_page_and_index(vault: Vault):
     result = vault.start_research("Sparse Attention", aim="Make attention sub-quadratic.")
-    assert result == {"bucket": "research", "id": "sparse-attention"}
+    assert result["bucket"] == "research"
+    assert result["id"] == "sparse-attention"
+    assert "log_research_note" in result["reminder"]
 
     page = (vault.root / "research" / "sparse-attention.md").read_text()
     assert "Make attention sub-quadratic." in page
@@ -108,6 +111,25 @@ def test_update_experiment_append_only_attempt_grammar(vault: Vault):
     result = vault.update_experiment(exp["id"])
     assert result["latest_attempt"] == 3
     assert result["status"] == "done"
+
+
+def test_update_experiment_rejects_invalid_status_before_writing(vault: Vault):
+    vault.start_research("Sparse Attention", aim="...")
+    exp = vault.start_experiment("Sparse Attention", title="Baseline", aim="...", setup="...")
+
+    with pytest.raises(Exception):
+        vault.update_experiment(exp["id"], status="in_progress")
+
+    body = (vault.root / "experiments" / f"{exp['id']}.md").read_text()
+    assert "in_progress" not in body
+    assert "status: planned" in body
+
+    # a bad status must not have crept into the page even partially — load_bucket (used by
+    # the dashboard, get_context, and weekly_progress) must still be able to parse this page
+    from server.models import Experiment, load_bucket
+
+    pages = load_bucket(vault.root / "experiments", Experiment)
+    assert len(pages) == 1
 
 
 def test_update_experiment_no_attempt_when_no_notes_or_metrics(vault: Vault):
@@ -263,3 +285,33 @@ def test_weekly_progress_handles_missing_repo_path_gracefully(vault: Vault):
 
     report = vault.weekly_progress()
     assert "repo path not found" in report
+
+
+def test_weekly_progress_is_structured_not_a_raw_log_dump(vault: Vault):
+    vault.start_research("Sparse Attention", aim="...")
+    vault.log_brainstorm("Sparse Attention", "First finding.")
+    exp = vault.start_experiment("Sparse Attention", title="Baseline", aim="...", setup="...")
+    vault.update_experiment(exp["id"], status="blocked", attempt_notes="stuck on OOM")
+    vault.add_resource("child2019generating", title="Generating Long Sequences")
+
+    report = vault.weekly_progress()
+
+    for heading in ("## Summary", "## Research", "## Experiments", "## Resources reviewed", "## Flags for discussion", "## Next steps"):
+        assert heading in report
+    # raw log.md lines (timestamp + bracketed tag) must not leak into the rendered report
+    assert "[research:" not in report
+    assert "[experiments:" not in report
+    assert "BLOCKED" in report  # blocked experiment surfaced as a flag, not buried in prose
+
+
+def test_weekly_progress_demotes_headings_inside_notes_to_nest_under_topic(vault: Vault):
+    vault.start_research("Sparse Attention", aim="...")
+    vault.log_brainstorm("Sparse Attention", "## Deep dive\nSome findings.\n### Sub-point\nmore detail")
+
+    report = vault.weekly_progress()
+
+    # the note's own dated heading (### YYYY-MM-DD) demotes to #### so it nests under the topic's ###
+    assert re.search(r"^#### \d{4}-\d{2}-\d{2}$", report, re.MULTILINE)
+    # headings written *inside* the note content shift down one level too (## -> ###, ### -> ####)
+    assert "### Deep dive" in report
+    assert "#### Sub-point" in report

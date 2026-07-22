@@ -15,6 +15,7 @@ from typing import Optional
 from mcp.server.fastmcp import FastMCP
 
 from server.dashboard.render import build_dashboard as render_dashboard
+from server.models import ExperimentStatus
 from server.storage import Vault
 
 DEFAULT_ROOT = Path(__file__).resolve().parent.parent
@@ -84,7 +85,7 @@ def start_experiment(research_ref: str, title: str, aim: str, setup: str) -> dic
 @mcp.tool()
 def update_experiment(
     experiment_ref: str,
-    status: Optional[str] = None,
+    status: Optional[ExperimentStatus] = None,
     setup_delta: Optional[str] = None,
     attempt_notes: Optional[str] = None,
     metrics: Optional[list[dict]] = None,
@@ -143,12 +144,14 @@ def get_context(ref: str) -> str:
 def weekly_progress(since: Optional[str] = None, until: Optional[str] = None) -> str:
     """Generate a weekly progress digest and persist it under progress/. Defaults to the last
     7 days ending today; pass since/until as ISO dates ('YYYY-MM-DD') for a different range.
-    Pulls together everything that happened in the tracker (research brainstorming, experiment
-    attempts, resource additions) AND raw git commit activity in any repo linked via link_code —
-    so coding work shows up here even if the researcher never called update_experiment for every
-    run. Flags any linked repo with commits this week that weren't reflected in a logged attempt,
-    so worked-on-but-undocumented progress doesn't get silently lost. Call this whenever the user
-    asks for a weekly summary/status update, or wants to see what they got done."""
+    Meeting-ready structure, not a raw log dump: a Summary section with counts up top, then
+    Research/Experiments/Resources sections with the actual findings/attempts/current-best for
+    each item touched this week (pulled from the pages themselves, not just log.md one-liners),
+    a Code activity section from git history in any repo linked via link_code (so coding work
+    shows up even if update_experiment was never called for a run), a Flags section rolling up
+    blocked experiments/unverified backfills/undocumented code changes for discussion, and a
+    Next steps placeholder to fill in before a meeting. Call this whenever the user asks for a
+    weekly summary/status update, or wants something to bring to a supervisor meeting."""
     since_date = dt.date.fromisoformat(since) if since else None
     until_date = dt.date.fromisoformat(until) if until else None
     return vault.weekly_progress(since_date, until_date)

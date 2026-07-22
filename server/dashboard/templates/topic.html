@@ -3,22 +3,22 @@
 {% block content %}
 <h1>{{ topic.title }} <span class="pill {{ topic.status }}">{{ topic.status }}</span></h1>
 <p class="muted">updated {{ topic.updated }}</p>
-{% if topic.aim %}<h2>Aim</h2><div>{{ topic.aim_html|safe }}</div>{% endif %}
-{% if topic.background_html %}<h2>Background</h2><div>{{ topic.background_html|safe }}</div>{% endif %}
+{% if topic.aim %}<h2 id="aim">Aim</h2><div>{{ topic.aim_html|safe }}</div>{% endif %}
+{% if topic.background_html %}<h2 id="background">Background</h2><div>{{ topic.background_html|safe }}</div>{% endif %}
 
-{% if topic.notes_html %}
-<h2>Notes</h2>
-{% for note in topic.notes_html %}
-<div class="card">{{ note|safe }}</div>
+{% if topic.notes %}
+<h2 id="notes">Notes</h2>
+{% for note in topic.notes %}
+<div class="card" id="{{ note.anchor }}">{{ note.html|safe }}</div>
 {% endfor %}
 {% endif %}
 
-<h2>Experiments</h2>
+<h2 id="experiments">Experiments</h2>
 {% if not topic.experiments %}
 <p class="muted">No experiments yet.</p>
 {% endif %}
 {% for e in topic.experiments %}
-<div class="card">
+<div class="card" id="exp-{{ e.id }}">
   <h3>{{ e.title }} <span class="pill {{ e.status }}">{{ e.status }}</span></h3>
   <p class="muted">
     {{ e.id }} &middot; updated {{ e.updated }} &middot; {{ e.latest_attempt }} attempt(s)

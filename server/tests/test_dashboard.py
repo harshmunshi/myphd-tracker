@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 import pytest
@@ -120,6 +121,33 @@ def test_topic_page_renders_full_attempt_history(vault: Vault):
     topic_page = (vault.root / "dashboard" / "topics" / "sparse-attention.html").read_text()
     assert "ran out of memory on attempt one" in topic_page
     assert "fixed batch size for attempt two" in topic_page
+
+
+def test_topic_page_sidebar_toc_links_to_sections_on_same_page(vault: Vault):
+    vault.start_research("Sparse Attention", aim="Make attention sub-quadratic.", background="...")
+    vault.log_brainstorm("Sparse Attention", "First finding.")
+    exp = vault.start_experiment("Sparse Attention", title="Baseline", aim="...", setup="...")
+
+    build_dashboard(vault.root)
+
+    topic_page = (vault.root / "dashboard" / "topics" / "sparse-attention.html").read_text()
+    assert 'href="#aim"' in topic_page and 'id="aim"' in topic_page
+    assert 'href="#background"' in topic_page and 'id="background"' in topic_page
+    assert 'href="#experiments"' in topic_page and 'id="experiments"' in topic_page
+    assert f'href="#exp-{exp["id"]}"' in topic_page and f'id="exp-{exp["id"]}"' in topic_page
+
+
+def test_topic_page_toc_anchors_unique_for_same_day_notes(vault: Vault):
+    vault.start_research("Sparse Attention", aim="...")
+    for i in range(3):
+        vault.log_brainstorm("Sparse Attention", f"finding number {i}")
+
+    build_dashboard(vault.root)
+
+    topic_page = (vault.root / "dashboard" / "topics" / "sparse-attention.html").read_text()
+    ids = re.findall(r'id="(note-[^"]+)"', topic_page)
+    assert len(ids) == 3
+    assert len(set(ids)) == 3  # same-day notes must not collide on one anchor
 
 
 def test_resource_gets_its_own_page_linked_from_bibliography(vault: Vault):

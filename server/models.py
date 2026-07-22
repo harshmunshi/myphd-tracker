@@ -16,7 +16,7 @@ from typing import Callable, Literal, Optional, TypeVar
 
 import frontmatter
 import yaml
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 # --- naming -------------------------------------------------------------
 
@@ -80,6 +80,12 @@ Origin = Literal["live", "backfilled"]
 
 
 class ResearchTopic(BaseModel):
+    # Without this, `model.status = "bogus"` silently succeeds (Pydantic only validates on
+    # construction/model_validate by default) and the invalid value gets written to disk —
+    # only surfacing as a crash later, in a completely different code path (load_bucket, used
+    # by the dashboard, get_context, weekly_progress, and the alias cache).
+    model_config = ConfigDict(validate_assignment=True)
+
     id: str
     title: str
     aliases: list[str] = Field(default_factory=list)
@@ -90,6 +96,8 @@ class ResearchTopic(BaseModel):
 
 
 class Experiment(BaseModel):
+    model_config = ConfigDict(validate_assignment=True)
+
     id: str
     title: str
     aliases: list[str] = Field(default_factory=list)
@@ -109,6 +117,8 @@ class Experiment(BaseModel):
 
 
 class Resource(BaseModel):
+    model_config = ConfigDict(validate_assignment=True)
+
     citekey: str
     title: str
     authors: list[str] = Field(default_factory=list)
@@ -121,6 +131,8 @@ class Resource(BaseModel):
 class ProgressReport(BaseModel):
     """A regenerable weekly digest — unlike research/experiment/resource pages, re-running
     weekly_progress for the same week overwrites its report rather than appending to it."""
+
+    model_config = ConfigDict(validate_assignment=True)
 
     id: str
     title: str

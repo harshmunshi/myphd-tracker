@@ -8,6 +8,7 @@ conventions this implements.
 from __future__ import annotations
 
 import datetime as dt
+import re
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -17,6 +18,7 @@ from filelock import FileLock
 from server.models import (
     CodeRef,
     Experiment,
+    ExperimentStatus,
     MetricRecord,
     PAGE_MODELS,
     ProgressReport,
@@ -41,6 +43,17 @@ BUCKET_TITLES = {
     "resources": "Resources",
     "progress": "Progress",
 }
+
+# Surfaced directly in tool output (start_research, get_context), not just the server-level
+# MCP instructions — a reminder sitting in the system prompt is easy to lose track of deep
+# into an agentic session; one repeated in the actual tool result the calling LLM just read
+# is much harder to miss. See CLAUDE.md Scene A: findings that never get log_research_note'd
+# are invisible to every future session.
+RESEARCH_LOGGING_REMINDER = (
+    "If you investigate this topic further in this turn (web search, deep-research pass, "
+    "reading a paper), call log_research_note with a summary of what you found before you "
+    "finish responding — findings that only live in the chat transcript are lost forever."
+)
 
 
 class VaultError(Exception):
@@ -191,7 +204,7 @@ class Vault:
                 body += f"\n## Background\n{background}\n"
             atomic_write(path, dump_page(model, body))
             self._mutate("research", slug, "created — status active")
-            return {"bucket": "research", "id": slug}
+            return {"bucket": "research", "id": slug, "reminder": RESEARCH_LOGGING_REMINDER}
 
     def log_brainstorm(self, topic_ref: str, note: str) -> dict:
         with self._lock:
@@ -239,7 +252,7 @@ class Vault:
     def update_experiment(
         self,
         ref: str,
-        status: Optional[str] = None,
+        status: Optional[ExperimentStatus] = None,
         setup_delta: Optional[str] = None,
         attempt_notes: Optional[str] = None,
         metrics: Optional[list[dict]] = None,
@@ -413,26 +426,175 @@ class Vault:
             )
         return activity
 
+    def _touched_idents(self, log_lines: list[str], bucket: str) -> list[str]:
+        """Distinct idents referenced in this bucket's log lines, in first-seen order."""
+        pattern = re.compile(rf"\[{bucket}:([^\]]+)\]")
+        seen: list[str] = []
+        for line in log_lines:
+            m = pattern.search(line)
+            if m and m.group(1) not in seen:
+                seen.append(m.group(1))
+        return seen
+
+    @staticmethod
+    def _dated_block_in_range(block: str, heading_re: re.Pattern, week_start: dt.date, week_end: dt.date) -> bool:
+        m = heading_re.search(block)
+        if not m:
+            return True  # can't tell the date — err toward including rather than silently dropping it
+        return week_start <= dt.date.fromisoformat(m.group(1)) <= week_end
+
+    _NOTE_DATE_RE = re.compile(r"^### (\d{4}-\d{2}-\d{2})")
+    _ATTEMPT_DATE_RE = re.compile(r"### Attempt \d+ — (\d{4}-\d{2}-\d{2})")
+
+    @staticmethod
+    def _demote_heading(block: str) -> str:
+        """Notes/attempts carry their own `### ...` heading in the source page, but the weekly
+        report nests them under a `### <topic/experiment>` heading of its own. Shift every ATX
+        heading in the block down one level (not just the leading one) — a note written from a
+        deep-research pass often brings its own internal `##`/`###` structure, and demoting only
+        the first line would leave those at the wrong depth relative to the report's own headings."""
+        return re.sub(r"^(#{1,5}) ", r"#\1 ", block, flags=re.MULTILINE)
+
+    def _research_updates_this_week(
+        self, idents: list[str], log_lines: list[str], week_start: dt.date, week_end: dt.date
+    ) -> list[dict]:
+        updates = []
+        for ident in idents:
+            path = self._page_path("research", ident)
+            if not path.exists():
+                continue
+            topic, body = parse_page(path, ResearchTopic)
+            is_new = any(f"[research:{ident}]" in line and "created" in line for line in log_lines)
+            notes = [
+                n
+                for n in extract_dated_notes(body)
+                if self._dated_block_in_range(n, self._NOTE_DATE_RE, week_start, week_end)
+            ]
+            updates.append(
+                {"id": ident, "title": topic.title, "status": topic.status, "is_new": is_new, "notes": notes}
+            )
+        return updates
+
+    def _experiment_updates_this_week(
+        self, idents: list[str], log_lines: list[str], week_start: dt.date, week_end: dt.date
+    ) -> list[dict]:
+        updates = []
+        for ident in idents:
+            path = self._page_path("experiments", ident)
+            if not path.exists():
+                continue
+            exp, body = parse_page(path, Experiment)
+            is_new = any(f"[experiments:{ident}]" in line and "created" in line for line in log_lines)
+            attempts = [
+                a
+                for a in extract_attempts(body)
+                if self._dated_block_in_range(a, self._ATTEMPT_DATE_RE, week_start, week_end)
+            ]
+            updates.append(
+                {
+                    "id": ident,
+                    "title": exp.title,
+                    "status": exp.status,
+                    "is_new": is_new,
+                    "attempts": attempts,
+                    "current_best": extract_section(body, "Current best"),
+                    "blocked": exp.status == "blocked",
+                    "unverified_backfill": exp.origin == "backfilled" and not exp.verified,
+                }
+            )
+        return updates
+
+    def _resource_updates_this_week(self, idents: list[str]) -> list[dict]:
+        updates = []
+        for ident in idents:
+            path = self._page_path("resources", ident)
+            if not path.exists():
+                continue
+            res, body = parse_page(path, Resource)
+            snippet = body.strip().split("\n\n")[0][:200] if body.strip() else ""
+            updates.append({"citekey": ident, "title": res.title, "snippet": snippet})
+        return updates
+
     def _render_weekly_progress(
         self,
         week_start: dt.date,
         week_end: dt.date,
-        research_lines: list[str],
-        experiment_lines: list[str],
-        resource_lines: list[str],
+        research_updates: list[dict],
+        experiment_updates: list[dict],
+        resource_updates: list[dict],
         code_activity: list[dict],
     ) -> str:
-        lines = [f"# Weekly Progress: {week_start.isoformat()} to {week_end.isoformat()}", ""]
+        blocked = [e for e in experiment_updates if e["blocked"]]
+        unverified = [e for e in experiment_updates if e["unverified_backfill"]]
+        undocumented_code = [
+            entry
+            for entry in code_activity
+            if not entry["attempt_logged_this_week"] and any(not c.startswith("(") for c in entry["commits"])
+        ]
 
-        lines.append("## Research activity")
-        lines.extend(research_lines or ["_none logged this week_"])
+        lines = [
+            f"# Weekly Progress: {week_start.isoformat()} to {week_end.isoformat()}",
+            f"_Generated {dt.date.today().isoformat()}_",
+            "",
+        ]
 
-        lines.append("\n## Experiment activity")
-        lines.extend(experiment_lines or ["_none logged this week_"])
+        # --- Summary — the part meant to be read first, e.g. in a supervisor meeting ---
+        lines.append("## Summary")
+        new_topics = sum(1 for r in research_updates if r["is_new"])
+        new_experiments = sum(1 for e in experiment_updates if e["is_new"])
+        total_attempts = sum(len(e["attempts"]) for e in experiment_updates)
+        lines.append(f"- **Research:** {len(research_updates)} topic(s) touched ({new_topics} new)")
+        lines.append(
+            f"- **Experiments:** {len(experiment_updates)} touched ({new_experiments} new, "
+            f"{total_attempts} attempt(s) logged)"
+        )
+        lines.append(f"- **Resources:** {len(resource_updates)} added to the bibliography")
+        if code_activity:
+            commit_total = sum(len([c for c in e["commits"] if not c.startswith("(")]) for e in code_activity)
+            lines.append(f"- **Code:** {commit_total} commit(s) across {len(code_activity)} linked repo(s)")
+        else:
+            lines.append("- **Code:** no linked repos yet")
+        if blocked or unverified or undocumented_code:
+            lines.append(
+                f"- **Needs attention:** {len(blocked)} blocked, {len(unverified)} unverified backfill, "
+                f"{len(undocumented_code)} undocumented code change(s) — see Flags below"
+            )
 
-        lines.append("\n## Resource activity")
-        lines.extend(resource_lines or ["_none logged this week_"])
+        # --- Research ---
+        lines.append("\n## Research")
+        if not research_updates:
+            lines.append("_none this week_")
+        for r in research_updates:
+            tag = " (new)" if r["is_new"] else ""
+            lines.append(f"\n### {r['title']}{tag} — {r['status']} `{r['id']}`")
+            if not r["notes"]:
+                lines.append("_no new notes logged this week_")
+            else:
+                lines.extend(self._demote_heading(n) for n in r["notes"])
 
+        # --- Experiments ---
+        lines.append("\n## Experiments")
+        if not experiment_updates:
+            lines.append("_none this week_")
+        for e in experiment_updates:
+            tag = " (new)" if e["is_new"] else ""
+            lines.append(f"\n### {e['title']}{tag} — {e['status']} `{e['id']}`")
+            if e["current_best"]:
+                lines.append(f"Current best: {e['current_best']}")
+            if not e["attempts"]:
+                lines.append("_no attempts logged this week_")
+            else:
+                lines.extend(self._demote_heading(a) for a in e["attempts"])
+
+        # --- Resources ---
+        lines.append("\n## Resources reviewed")
+        if not resource_updates:
+            lines.append("_none this week_")
+        for r in resource_updates:
+            snippet = f" — {r['snippet']}" if r["snippet"] else ""
+            lines.append(f"- **{r['citekey']}** — {r['title']}{snippet}")
+
+        # --- Code activity ---
         lines.append("\n## Code activity (linked repos)")
         if not code_activity:
             lines.append("_no experiments have linked code repos yet — use link_code_")
@@ -451,6 +613,23 @@ class Vault:
                     f"for {entry['experiment_id']} — consider logging what happened."
                 )
 
+        # --- Flags for discussion — the risks/blockers a supervisor would want called out ---
+        lines.append("\n## Flags for discussion")
+        flags = []
+        for e in blocked:
+            flags.append(f"- **BLOCKED:** {e['title']} (`{e['id']}`)")
+        for e in unverified:
+            flags.append(f"- **UNVERIFIED (backfilled):** {e['title']} (`{e['id']}`)")
+        for entry in undocumented_code:
+            flags.append(
+                f"- **UNDOCUMENTED CODE:** {entry['experiment_id']} has commits this week not "
+                f"reflected in a logged attempt"
+            )
+        lines.extend(flags or ["_none_"])
+
+        lines.append("\n## Next steps")
+        lines.append("_(fill in before the meeting)_")
+
         return "\n".join(lines) + "\n"
 
     def weekly_progress(
@@ -462,13 +641,18 @@ class Vault:
             week_start = since or (week_end - dt.timedelta(days=7))
 
             log_lines = self._log_lines_in_range(week_start, week_end)
-            research_lines = [line for line in log_lines if "[research:" in line]
+            research_updates = self._research_updates_this_week(
+                self._touched_idents(log_lines, "research"), log_lines, week_start, week_end
+            )
+            experiment_updates = self._experiment_updates_this_week(
+                self._touched_idents(log_lines, "experiments"), log_lines, week_start, week_end
+            )
+            resource_updates = self._resource_updates_this_week(self._touched_idents(log_lines, "resources"))
             experiment_lines = [line for line in log_lines if "[experiments:" in line]
-            resource_lines = [line for line in log_lines if "[resources:" in line]
             code_activity = self._scan_linked_code_repos(week_start, week_end, experiment_lines)
 
             body = self._render_weekly_progress(
-                week_start, week_end, research_lines, experiment_lines, resource_lines, code_activity
+                week_start, week_end, research_updates, experiment_updates, resource_updates, code_activity
             )
 
             report_id = week_end.isoformat()
@@ -576,6 +760,8 @@ class Vault:
         if recent_log:
             lines.append("\n## Recent activity")
             lines.extend(recent_log)
+
+        lines.append(f"\n---\n**Reminder:** {RESEARCH_LOGGING_REMINDER}")
 
         return "\n".join(lines) + "\n"
 

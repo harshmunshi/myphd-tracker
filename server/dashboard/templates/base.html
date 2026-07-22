@@ -5,11 +5,42 @@
 <title>{% block title %}myphd-tracker{% endblock %}</title>
 <style>
   :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
   body {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    max-width: 900px; margin: 2rem auto; padding: 0 1rem; line-height: 1.5;
+    margin: 0; padding: 0; line-height: 1.5;
   }
-  nav a { margin-right: 1rem; }
+  .layout {
+    display: flex; align-items: flex-start; gap: 2.5rem;
+    max-width: 1100px; margin: 0 auto; padding: 2rem 1rem;
+  }
+  .sidebar {
+    flex: 0 0 220px; position: sticky; top: 1rem;
+    font-size: 0.9rem; max-height: calc(100vh - 2rem); overflow-y: auto;
+  }
+  .sidebar h2 {
+    font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em;
+    color: #888; margin: 1.25rem 0 0.4rem;
+  }
+  .sidebar h2:first-child { margin-top: 0; }
+  .sidebar ul { list-style: none; margin: 0; padding: 0; }
+  .sidebar li { margin: 0.15rem 0; }
+  .sidebar a { display: block; padding: 0.15rem 0.4rem; border-radius: 4px; text-decoration: none; }
+  .sidebar a:hover { background: rgba(127, 127, 127, 0.15); }
+  .sidebar a.current { background: rgba(122, 180, 255, 0.2); font-weight: 600; }
+  .sidebar .status-dot {
+    display: inline-block; width: 0.5rem; height: 0.5rem; border-radius: 50%;
+    margin-right: 0.4rem; vertical-align: middle;
+  }
+  .status-dot.active, .status-dot.running, .status-dot.done { background: #2f9e44; }
+  .status-dot.blocked, .status-dot.failed { background: #c92a2a; }
+  .status-dot.planned, .status-dot.paused { background: #e8a300; }
+  .status-dot.abandoned { background: #999; }
+  .sidebar .muted { padding: 0.15rem 0.4rem; display: block; }
+  .sidebar ul.toc ul { margin-left: 0.9rem; border-left: 1px solid #ddd; }
+  .sidebar ul.toc a { font-size: 0.85rem; }
+  .sidebar-rule { border: none; border-top: 1px solid #ddd; margin: 1rem 0; }
+  .content { flex: 1 1 auto; min-width: 0; max-width: 800px; }
   h1, h2, h3 { line-height: 1.25; }
   .pill {
     display: inline-block; padding: 0.1rem 0.6rem; border-radius: 999px;
@@ -25,6 +56,10 @@
   table { border-collapse: collapse; margin: 1rem 0; }
   th, td { border: 1px solid #ddd; padding: 0.3rem 0.6rem; text-align: left; }
   details summary { cursor: pointer; }
+  @media (max-width: 700px) {
+    .layout { flex-direction: column; gap: 1rem; }
+    .sidebar { position: static; width: 100%; max-height: none; }
+  }
   @media (prefers-color-scheme: dark) {
     body { background: #1a1a1a; color: #eee; }
     .card { border-color: #444; }
@@ -32,15 +67,69 @@
     th, td { border-color: #444; }
     .muted { color: #999; }
     a { color: #7ab4ff; }
+    .sidebar h2 { color: #999; }
+    .sidebar ul.toc ul { border-color: #444; }
+    .sidebar-rule { border-color: #444; }
   }
 </style>
 </head>
 <body>
-<nav>
-  <a href="{{ root_prefix }}index.html">Overview</a>
-  <a href="{{ root_prefix }}bibliography.html">Bibliography</a>
-</nav>
-<hr>
-{% block content %}{% endblock %}
+<div class="layout">
+  <aside class="sidebar">
+    {% if page_toc %}
+    <h2>On this page</h2>
+    <ul class="toc">
+      {% for entry in page_toc %}
+      <li>
+        <a href="#{{ entry.anchor }}">{{ entry.label }}</a>
+        {% if entry.children %}
+        <ul>
+          {% for child in entry.children %}
+          <li><a href="#{{ child.anchor }}">{{ child.label }}</a></li>
+          {% endfor %}
+        </ul>
+        {% endif %}
+      </li>
+      {% endfor %}
+    </ul>
+    <hr class="sidebar-rule">
+    {% endif %}
+
+    <h2>myphd-tracker</h2>
+    <ul>
+      <li><a href="{{ root_prefix }}index.html"{% if active[0] == "index" %} class="current"{% endif %}>Overview</a></li>
+      <li><a href="{{ root_prefix }}bibliography.html"{% if active[0] == "bibliography" %} class="current"{% endif %}>Bibliography ({{ nav_resource_count }})</a></li>
+    </ul>
+
+    <h2>Research</h2>
+    {% if not nav_topics %}
+    <span class="muted">none yet</span>
+    {% else %}
+    <ul>
+      {% for t in nav_topics %}
+      <li>
+        <a href="{{ root_prefix }}topics/{{ t.id }}.html"{% if active == ("topic", t.id) %} class="current"{% endif %}>
+          <span class="status-dot {{ t.status }}"></span>{{ t.title }}
+        </a>
+      </li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+
+    <h2>Progress reports</h2>
+    {% if not nav_reports %}
+    <span class="muted">none yet</span>
+    {% else %}
+    <ul>
+      {% for r in nav_reports %}
+      <li><a href="{{ root_prefix }}progress/{{ r.id }}.html"{% if active == ("report", r.id) %} class="current"{% endif %}>{{ r.title }}</a></li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+  </aside>
+  <main class="content">
+    {% block content %}{% endblock %}
+  </main>
+</div>
 </body>
 </html>

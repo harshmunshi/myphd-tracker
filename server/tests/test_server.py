@@ -82,6 +82,28 @@ def test_log_research_note_call_persists_and_shows_in_context(mcp_env):
     assert "Linformer achieves O(n)" in content_blocks[0].text
 
 
+def test_track_research_topic_result_reminds_to_log_findings(mcp_env):
+    server_module, _ = mcp_env
+    result = asyncio.run(
+        server_module.mcp.call_tool(
+            "track_research_topic", {"topic": "sparse attention", "aim": "sub-quadratic attention"}
+        )
+    )
+    assert "log_research_note" in result[0].text
+
+
+def test_get_context_for_research_reminds_to_log_findings(mcp_env):
+    server_module, _ = mcp_env
+    asyncio.run(
+        server_module.mcp.call_tool(
+            "track_research_topic", {"topic": "sparse attention", "aim": "sub-quadratic attention"}
+        )
+    )
+    result = asyncio.run(server_module.mcp.call_tool("get_context", {"ref": "sparse attention"}))
+    content_blocks, _structured = result
+    assert "log_research_note" in content_blocks[0].text
+
+
 def test_weekly_progress_call_accepts_date_strings_and_persists(mcp_env):
     server_module, root = mcp_env
     asyncio.run(
