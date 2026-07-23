@@ -8,6 +8,13 @@
   {% if resource.tags %}&middot; tags: {{ resource.tags|join(", ") }}{% endif %}
 </p>
 {% if resource.path_or_url %}<p><a href="{{ resource.path_or_url }}">{{ resource.path_or_url }}</a></p>{% endif %}
+{% if resource.topics %}
+<p class="muted">Linked to:
+  {% for t in resource.topics %}<a href="../topics/{{ t.id }}.html">{{ t.title }}</a>{% if not loop.last %}, {% endif %}{% endfor %}
+</p>
+{% else %}
+<p class="muted">Not linked to any research topic yet.</p>
+{% endif %}
 {% if resource.annotation_html %}
 {{ resource.annotation_html|safe }}
 {% else %}

@@ -12,11 +12,14 @@ import re
 import tempfile
 from datetime import date
 from pathlib import Path
-from typing import Callable, Literal, Optional, TypeVar
+from typing import TYPE_CHECKING, Callable, Literal, Optional, TypeVar
 
 import frontmatter
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+if TYPE_CHECKING:
+    from _typeshed import SupportsRichComparison
 
 # --- naming -------------------------------------------------------------
 
@@ -135,7 +138,8 @@ class Resource(BaseModel):
 
 class ProgressReport(BaseModel):
     """A regenerable weekly digest — unlike research/experiment/resource pages, re-running
-    weekly_progress for the same week overwrites its report rather than appending to it."""
+    weekly_progress for the same week overwrites its report rather than appending to it.
+    """
 
     model_config = ConfigDict(validate_assignment=True)
 
@@ -156,6 +160,10 @@ PAGE_MODELS: dict[str, type[BaseModel]] = {
 
 def _page_ident(page: BaseModel) -> str:
     return getattr(page, "id", None) or getattr(page, "citekey")
+
+
+def _page_title(page: BaseModel) -> str:
+    return getattr(page, "title")
 
 
 # --- frontmatter <-> markdown ----------------------------------------------
@@ -191,9 +199,9 @@ def load_bucket(bucket_dir: Path, model_cls: type[PageModel]) -> list[tuple[Page
 
 def render_index(
     bucket_title: str,
-    pages: list[BaseModel],
-    sort_key: Callable[[BaseModel], object],
-    group_key: Optional[Callable[[BaseModel], str]] = None,
+    pages: list[PageModel],
+    sort_key: Callable[[PageModel], SupportsRichComparison],
+    group_key: Optional[Callable[[PageModel], str]] = None,
     note: str = "",
 ) -> str:
     header = "<!-- GENERATED FILE — do not hand-edit. Rewritten in full on every mutation. -->\n\n"
@@ -207,17 +215,17 @@ def render_index(
     sorted_pages = sorted(pages, key=sort_key, reverse=True)
 
     if group_key is None:
-        lines = [f"- [{p.title}]({_page_ident(p)}.md)" for p in sorted_pages]
+        lines = [f"- [{_page_title(p)}]({_page_ident(p)}.md)" for p in sorted_pages]
         return header + "\n" + "\n".join(lines) + "\n"
 
-    groups: dict[str, list[BaseModel]] = {}
+    groups: dict[str, list[PageModel]] = {}
     for p in sorted_pages:
         groups.setdefault(group_key(p), []).append(p)
 
     out = [header.rstrip("\n")]
     for label, group_pages in groups.items():
         out.append(f"\n## {label}\n")
-        out.extend(f"- [{p.title}]({_page_ident(p)}.md)" for p in group_pages)
+        out.extend(f"- [{_page_title(p)}]({_page_ident(p)}.md)" for p in group_pages)
     return "\n".join(out) + "\n"
 
 
@@ -272,7 +280,8 @@ def extract_attempts(body: str) -> list[str]:
 def extract_dated_notes(body: str) -> list[str]:
     """Notes appended by log_research_note (### YYYY-MM-DD headings) — the running record of
     brainstorming and research findings on a topic. get_context must surface these, not just
-    the static Aim/Background sections, or anything logged after topic creation is invisible."""
+    the static Aim/Background sections, or anything logged after topic creation is invisible.
+    """
     return _extract_blocks(body, DATED_NOTE_HEADING_RE)
 
 

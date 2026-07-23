@@ -19,8 +19,8 @@ from server.dashboard.svg import sparkline_svg
 from server.models import (
     Experiment,
     ProgressReport,
-    Resource,
     ResearchTopic,
+    Resource,
     atomic_write,
     extract_attempts,
     extract_dated_notes,
@@ -46,9 +46,7 @@ def _experiment_view(exp: Experiment, body: str) -> dict:
     by_name: dict[str, list[tuple[int, float]]] = {}
     for m in extract_metrics(body):
         by_name.setdefault(m.name, []).append((m.attempt, m.value))
-    sparklines = {
-        name: sparkline_svg([v for _, v in sorted(points)]) for name, points in by_name.items()
-    }
+    sparklines = {name: sparkline_svg([v for _, v in sorted(points)]) for name, points in by_name.items()}
     current_best = extract_section(body, "Current best")
     attempts_html = [_render_md(a) for a in reversed(extract_attempts(body))]
     return {
@@ -103,10 +101,13 @@ def _build_pages(vault_root: Path, output_dir: Path) -> list[Path]:
     topic_views = []
     for topic, topic_body in topics:
         exps = sorted(
-            experiments_by_topic.get(topic.id, []), key=lambda e: e["updated"], reverse=True
+            experiments_by_topic.get(topic.id, []),
+            key=lambda e: e["updated"],
+            reverse=True,
         )
+        topic_resource_keys = resource_citekeys_by_topic.get(topic.id, set())
         topic_resources = sorted(
-            (resource_by_citekey[ck] for ck in resource_citekeys_by_topic.get(topic.id, set()) if ck in resource_by_citekey),
+            (resource_by_citekey[ck] for ck in topic_resource_keys if ck in resource_by_citekey),
             key=lambda r: r["title"],
         )
         aim = extract_section(topic_body, "Aim")
@@ -118,7 +119,13 @@ def _build_pages(vault_root: Path, output_dir: Path) -> list[Path]:
             # index-suffixed so same-day notes (a topic can get several in one session) don't
             # collide on a shared #note-<date> anchor — the label stays the plain date, only
             # the anchor needs to be unique.
-            notes.append({"anchor": f"note-{i}-{date}", "date": date, "html": _render_md(raw_note)})
+            notes.append(
+                {
+                    "anchor": f"note-{i}-{date}",
+                    "date": date,
+                    "html": _render_md(raw_note),
+                }
+            )
 
         # Per-topic "on this page" table of contents — this is what makes the sidebar change
         # to reflect the topic you're actually looking at, rather than staying a static,
@@ -168,7 +175,9 @@ def _build_pages(vault_root: Path, output_dir: Path) -> list[Path]:
     topic_id_to_title = {t["id"]: t["title"] for t in topic_views}
     for r in resource_views:
         r["topics"] = [
-            {"id": ref, "title": topic_id_to_title[ref]} for ref in r["research_refs"] if ref in topic_id_to_title
+            {"id": ref, "title": topic_id_to_title[ref]}
+            for ref in r["research_refs"]
+            if ref in topic_id_to_title
         ]
 
     # Bibliography grouped per idea rather than one flat list — a resource with no research_refs
@@ -253,7 +262,11 @@ def _build_pages(vault_root: Path, output_dir: Path) -> list[Path]:
     current_resource_pages = set()
     for resource in resource_views:
         html = _env.get_template("resource.html").render(
-            root_prefix="../", active=("bibliography", None), page_toc=[], resource=resource, **nav
+            root_prefix="../",
+            active=("bibliography", None),
+            page_toc=[],
+            resource=resource,
+            **nav,
         )
         path = resources_dir / f"{resource['citekey']}.html"
         atomic_write(path, html)
@@ -267,7 +280,11 @@ def _build_pages(vault_root: Path, output_dir: Path) -> list[Path]:
     current_report_pages = set()
     for report in report_views:
         html = _env.get_template("progress.html").render(
-            root_prefix="../", active=("report", report["id"]), page_toc=[], report=report, **nav
+            root_prefix="../",
+            active=("report", report["id"]),
+            page_toc=[],
+            report=report,
+            **nav,
         )
         path = progress_dir / f"{report['id']}.html"
         atomic_write(path, html)

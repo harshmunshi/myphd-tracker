@@ -15,7 +15,9 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "pyright>=1.1.411",
     "pytest>=9.1.1",
+    "ruff>=0.15.22",
 ]
 
 [project.scripts]
@@ -30,3 +32,14 @@ packages = ["server"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[tool.pyright]
+include = ["server"]
+typeCheckingMode = "basic"

@@ -26,7 +26,10 @@ def test_build_dashboard_renders_topic_experiment_and_sparkline(vault: Vault):
     vault.start_research("Sparse Attention", aim="Make attention sub-quadratic.")
     exp = vault.start_experiment("Sparse Attention", title="Baseline", aim="...", setup="...")
     vault.update_experiment(
-        exp["id"], status="failed", attempt_notes="OOM", metrics=[{"name": "val_ppl", "value": 14.2, "attempt": 1}]
+        exp["id"],
+        status="failed",
+        attempt_notes="OOM",
+        metrics=[{"name": "val_ppl", "value": 14.2, "attempt": 1}],
     )
     vault.update_experiment(
         exp["id"],
@@ -100,7 +103,11 @@ def test_build_dashboard_is_idempotent_full_rebuild(vault: Vault):
 
 
 def test_topic_page_renders_background_and_dated_notes(vault: Vault):
-    vault.start_research("Sparse Attention", aim="Make attention sub-quadratic.", background="Quadratic scaling hurts.")
+    vault.start_research(
+        "Sparse Attention",
+        aim="Make attention sub-quadratic.",
+        background="Quadratic scaling hurts.",
+    )
     vault.log_brainstorm("Sparse Attention", "Looked into Longformer and Reformer today.")
 
     build_dashboard(vault.root)
@@ -165,6 +172,48 @@ def test_resource_gets_its_own_page_linked_from_bibliography(vault: Vault):
 
     resource_page = (vault.root / "dashboard" / "resources" / "child2019generating.html").read_text()
     assert "sparse-factorization trick" in resource_page
+
+
+def test_bibliography_is_grouped_per_topic_not_one_flat_list(vault: Vault):
+    vault.start_research("Sparse Attention", aim="...")
+    vault.start_research("Graph Embeddings", aim="...")
+    vault.add_resource(
+        "child2019generating",
+        title="Generating Long Sequences",
+        research_ref="Sparse Attention",
+    )
+    vault.add_resource("sun2019rotate", title="RotatE", research_ref="Graph Embeddings")
+    vault.add_resource("orphan2020paper", title="Orphan Paper")  # no research_ref
+
+    build_dashboard(vault.root)
+
+    bib = (vault.root / "dashboard" / "bibliography.html").read_text()
+    # each topic gets its own heading/group, plus an Unlinked group for the orphan — search for
+    # the group heading markup specifically, since the sidebar nav also lists both topic titles.
+    # Don't assume which of the two topic groups renders first (both created same day, so file
+    # glob order decides it) — just check each resource sits within its own group's span.
+    sparse_idx = bib.index('<a href="topics/sparse-attention.html">Sparse Attention</a></h2>')
+    graph_idx = bib.index('<a href="topics/graph-embeddings.html">Graph Embeddings</a></h2>')
+    orphan_group_idx = bib.index("<h2>Unlinked</h2>")
+    child_idx = bib.index("child2019generating")
+    rotate_idx = bib.index("sun2019rotate")
+    orphan_res_idx = bib.index("orphan2020paper")
+
+    groups = sorted(
+        [("sparse", sparse_idx, child_idx), ("graph", graph_idx, rotate_idx)],
+        key=lambda g: g[1],
+    )
+    (_, first_heading, first_resource), (_, second_heading, second_resource) = groups
+    assert first_heading < first_resource < second_heading  # first group's resource before next heading
+    assert second_heading < second_resource < orphan_group_idx  # second group's resource before Unlinked
+    assert orphan_group_idx < orphan_res_idx  # unlinked resource falls into its own group
+
+    # and the topic page itself carries a Resources section for its own linked resource(s)
+    topic_page = (vault.root / "dashboard" / "topics" / "sparse-attention.html").read_text()
+    assert 'href="#resources"' in topic_page
+    assert 'id="resources"' in topic_page
+    assert "child2019generating" in topic_page
+    assert "sun2019rotate" not in topic_page  # doesn't leak into the wrong topic's page
 
 
 def test_progress_report_gets_its_own_page_linked_from_index(vault: Vault):

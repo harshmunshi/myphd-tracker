@@ -8,6 +8,7 @@ conventions this implements.
 from __future__ import annotations
 
 import datetime as dt
+import difflib
 import re
 import subprocess
 from pathlib import Path
@@ -16,14 +17,14 @@ from typing import Optional
 from filelock import FileLock
 
 from server.models import (
+    PAGE_MODELS,
     CodeRef,
     Experiment,
     ExperimentStatus,
     MetricRecord,
-    PAGE_MODELS,
     ProgressReport,
-    Resource,
     ResearchTopic,
+    Resource,
     atomic_write,
     dump_page,
     experiment_id,
@@ -84,7 +85,8 @@ def _append_under_heading(body: str, heading: str, text: str) -> str:
 
 def _insert_before_heading_or_end(body: str, heading: str, text: str) -> str:
     """Insert `text` as a new block right before `## heading` if it exists, else at EOF.
-    Used to keep newly-appended attempt blocks ahead of the trailing Current-best section."""
+    Used to keep newly-appended attempt blocks ahead of the trailing Current-best section.
+    """
     lines = body.split("\n")
     heading_line = f"## {heading}"
     try:
@@ -158,21 +160,92 @@ class Vault:
         bucket, ident = hit.split(":", 1)
         return bucket, ident
 
+    # --- read-only queries backing the composition prompts (server/prompts.py) ---------------
+    # These exist so a prompt can check real vault state (not just conversation history) before
+    # telling the calling LLM what to do next — e.g. whether a topic already exists regardless
+    # of what chat session raised it, or whether an experiment already exists for a topic before
+    # code activity gets logged as a brand new one.
+
+    def find_similar_topics(self, query: str, limit: int = 5) -> list[dict]:
+        """Fuzzy-match `query` against every topic's title/aliases/id via stdlib difflib — no
+        search infra, consistent with CLAUDE.md's non-goal of not building full-text search for
+        a vault this small. Returns candidates above a relevance threshold, best match first.
+        """
+        topics = load_bucket(self._bucket_dir("research"), ResearchTopic)
+        scored = []
+        for topic, _ in topics:
+            names = [topic.title, topic.id, *topic.aliases]
+            best = max(
+                difflib.SequenceMatcher(None, query.strip().lower(), name.lower()).ratio() for name in names
+            )
+            if best >= 0.4:
+                scored.append((best, topic))
+        scored.sort(key=lambda pair: pair[0], reverse=True)
+        return [
+            {"id": t.id, "title": t.title, "status": t.status, "score": round(score, 2)}
+            for score, t in scored[:limit]
+        ]
+
+    def list_experiments_for_topic(self, research_ref: str) -> list[dict]:
+        """All experiments linked to a research topic — id/title/status/latest_attempt — so a
+        prompt can tell the calling LLM whether to continue an existing experiment or start a
+        genuinely new one, instead of guessing."""
+        bucket, ident = self.resolve(research_ref)
+        if bucket != "research":
+            raise VaultError(f"{research_ref!r} is not a research topic")
+        experiments = load_bucket(self._bucket_dir("experiments"), Experiment)
+        return [
+            {
+                "id": e.id,
+                "title": e.title,
+                "status": e.status,
+                "latest_attempt": e.latest_attempt,
+            }
+            for e, _ in experiments
+            if ident in e.research_refs
+        ]
+
+    def session_flags(self) -> dict:
+        """Cross-vault flags a session wrap-up should surface right now: experiments blocked or
+        backfilled-without-verification, and resources never linked to any research topic. Not
+        date-ranged like weekly_progress — this is current state, not "this week's" activity.
+        """
+        experiments = load_bucket(self._bucket_dir("experiments"), Experiment)
+        blocked = [{"id": e.id, "title": e.title} for e, _ in experiments if e.status == "blocked"]
+        unverified = [
+            {"id": e.id, "title": e.title}
+            for e, _ in experiments
+            if e.origin == "backfilled" and not e.verified
+        ]
+        resources = load_bucket(self._bucket_dir("resources"), Resource)
+        unlinked_resources = [
+            {"citekey": r.citekey, "title": r.title} for r, _ in resources if not r.research_refs
+        ]
+        return {
+            "blocked": blocked,
+            "unverified_backfilled": unverified,
+            "unlinked_resources": unlinked_resources,
+        }
+
     # --- reindex / log ----------------------------------------------------
 
     def _reindex(self, bucket: str) -> None:
+        # model_cls is `type[BaseModel]` here (PAGE_MODELS is keyed by bucket name, not a
+        # per-bucket literal type), so pages is typed as list[BaseModel] regardless of which
+        # bucket this actually is — getattr sidesteps that rather than fighting it with a
+        # Protocol just for these four call sites, same idiom as _page_ident/_page_title.
         model_cls = PAGE_MODELS[bucket]
         pages = [p for p, _ in load_bucket(self._bucket_dir(bucket), model_cls)]
         if bucket == "resources":
-            content = render_index(BUCKET_TITLES[bucket], pages, sort_key=lambda p: p.created)
+            content = render_index(BUCKET_TITLES[bucket], pages, sort_key=lambda p: getattr(p, "created"))
         elif bucket == "progress":
-            content = render_index(BUCKET_TITLES[bucket], pages, sort_key=lambda p: p.week_end)
+            content = render_index(BUCKET_TITLES[bucket], pages, sort_key=lambda p: getattr(p, "week_end"))
         else:
             content = render_index(
                 BUCKET_TITLES[bucket],
                 pages,
-                sort_key=lambda p: p.updated,
-                group_key=lambda p: p.status,
+                sort_key=lambda p: getattr(p, "updated"),
+                group_key=lambda p: getattr(p, "status"),
             )
         atomic_write(self._bucket_dir(bucket) / "index.md", content)
 
@@ -197,14 +270,23 @@ class Vault:
                 raise AlreadyExists(f"research topic {slug!r} already exists")
             today = dt.date.today()
             model = ResearchTopic(
-                id=slug, title=topic, status="active", origin="live", created=today, updated=today
+                id=slug,
+                title=topic,
+                status="active",
+                origin="live",
+                created=today,
+                updated=today,
             )
             body = f"## Aim\n{aim}\n"
             if background:
                 body += f"\n## Background\n{background}\n"
             atomic_write(path, dump_page(model, body))
             self._mutate("research", slug, "created — status active")
-            return {"bucket": "research", "id": slug, "reminder": RESEARCH_LOGGING_REMINDER}
+            return {
+                "bucket": "research",
+                "id": slug,
+                "reminder": RESEARCH_LOGGING_REMINDER,
+            }
 
     def log_brainstorm(self, topic_ref: str, note: str) -> dict:
         with self._lock:
@@ -293,7 +375,12 @@ class Vault:
             if logged_attempt:
                 msg = f"attempt {model.latest_attempt} logged — {msg}"
             self._mutate(bucket, ident, msg)
-            return {"bucket": bucket, "id": ident, "status": model.status, "latest_attempt": model.latest_attempt}
+            return {
+                "bucket": bucket,
+                "id": ident,
+                "status": model.status,
+                "latest_attempt": model.latest_attempt,
+            }
 
     def link_code(
         self,
@@ -311,7 +398,11 @@ class Vault:
             path = self._page_path(bucket, ident)
             model, body = parse_page(path, Experiment)
             model.code_ref = CodeRef(
-                path=repo_path, remote=remote, commit=commit_sha, entrypoint=entrypoint, dirty=dirty
+                path=repo_path,
+                remote=remote,
+                commit=commit_sha,
+                entrypoint=entrypoint,
+                dirty=dirty,
             )
             model.updated = dt.date.today()
             atomic_write(path, dump_page(model, body))
@@ -359,7 +450,8 @@ class Vault:
     def link_resource(self, resource_ref: str, research_ref: str) -> dict:
         """Retroactively (or additionally) tie an existing resource to a research topic, so it
         shows up in that topic's own bibliography instead of only the undifferentiated global
-        list. A resource can belong to more than one topic — this appends, it never replaces."""
+        list. A resource can belong to more than one topic — this appends, it never replaces.
+        """
         with self._lock:
             r_bucket, r_ident = self.resolve(resource_ref)
             if r_bucket != "resources":
@@ -373,7 +465,11 @@ class Vault:
                 model.research_refs = model.research_refs + [t_ident]
                 atomic_write(path, dump_page(model, body))
                 self._mutate("resources", r_ident, f"linked to research:{t_ident}")
-            return {"bucket": "resources", "id": r_ident, "research_refs": model.research_refs}
+            return {
+                "bucket": "resources",
+                "id": r_ident,
+                "research_refs": model.research_refs,
+            }
 
     def annotate_resource(self, ref: str, note: str) -> dict:
         with self._lock:
@@ -465,7 +561,9 @@ class Vault:
         return seen
 
     @staticmethod
-    def _dated_block_in_range(block: str, heading_re: re.Pattern, week_start: dt.date, week_end: dt.date) -> bool:
+    def _dated_block_in_range(
+        block: str, heading_re: re.Pattern, week_start: dt.date, week_end: dt.date
+    ) -> bool:
         m = heading_re.search(block)
         if not m:
             return True  # can't tell the date — err toward including rather than silently dropping it
@@ -480,11 +578,16 @@ class Vault:
         report nests them under a `### <topic/experiment>` heading of its own. Shift every ATX
         heading in the block down one level (not just the leading one) — a note written from a
         deep-research pass often brings its own internal `##`/`###` structure, and demoting only
-        the first line would leave those at the wrong depth relative to the report's own headings."""
+        the first line would leave those at the wrong depth relative to the report's own headings.
+        """
         return re.sub(r"^(#{1,5}) ", r"#\1 ", block, flags=re.MULTILINE)
 
     def _research_updates_this_week(
-        self, idents: list[str], log_lines: list[str], week_start: dt.date, week_end: dt.date
+        self,
+        idents: list[str],
+        log_lines: list[str],
+        week_start: dt.date,
+        week_end: dt.date,
     ) -> list[dict]:
         updates = []
         for ident in idents:
@@ -499,12 +602,22 @@ class Vault:
                 if self._dated_block_in_range(n, self._NOTE_DATE_RE, week_start, week_end)
             ]
             updates.append(
-                {"id": ident, "title": topic.title, "status": topic.status, "is_new": is_new, "notes": notes}
+                {
+                    "id": ident,
+                    "title": topic.title,
+                    "status": topic.status,
+                    "is_new": is_new,
+                    "notes": notes,
+                }
             )
         return updates
 
     def _experiment_updates_this_week(
-        self, idents: list[str], log_lines: list[str], week_start: dt.date, week_end: dt.date
+        self,
+        idents: list[str],
+        log_lines: list[str],
+        week_start: dt.date,
+        week_end: dt.date,
     ) -> list[dict]:
         updates = []
         for ident in idents:
@@ -660,9 +773,7 @@ class Vault:
 
         return "\n".join(lines) + "\n"
 
-    def weekly_progress(
-        self, since: Optional[dt.date] = None, until: Optional[dt.date] = None
-    ) -> str:
+    def weekly_progress(self, since: Optional[dt.date] = None, until: Optional[dt.date] = None) -> str:
         with self._lock:
             today = dt.date.today()
             week_end = until or today
@@ -670,17 +781,28 @@ class Vault:
 
             log_lines = self._log_lines_in_range(week_start, week_end)
             research_updates = self._research_updates_this_week(
-                self._touched_idents(log_lines, "research"), log_lines, week_start, week_end
+                self._touched_idents(log_lines, "research"),
+                log_lines,
+                week_start,
+                week_end,
             )
             experiment_updates = self._experiment_updates_this_week(
-                self._touched_idents(log_lines, "experiments"), log_lines, week_start, week_end
+                self._touched_idents(log_lines, "experiments"),
+                log_lines,
+                week_start,
+                week_end,
             )
             resource_updates = self._resource_updates_this_week(self._touched_idents(log_lines, "resources"))
             experiment_lines = [line for line in log_lines if "[experiments:" in line]
             code_activity = self._scan_linked_code_repos(week_start, week_end, experiment_lines)
 
             body = self._render_weekly_progress(
-                week_start, week_end, research_updates, experiment_updates, resource_updates, code_activity
+                week_start,
+                week_end,
+                research_updates,
+                experiment_updates,
+                resource_updates,
+                code_activity,
             )
 
             report_id = week_end.isoformat()
@@ -752,13 +874,11 @@ class Vault:
             shown_notes = notes[-3:]
             omitted_notes = len(notes) - len(shown_notes)
             if omitted_notes > 0:
-                lines.append(f"_{omitted_notes} earlier note(s) omitted — ask for the full history if needed._")
+                lines.append(f"_{omitted_notes} earlier note(s) omitted — ask for the full history._")
             lines.extend(shown_notes)
             lines.append("")
 
-        flags = [
-            f"- BLOCKED: {exp.id}" for exp, _ in experiments if exp.status == "blocked"
-        ] + [
+        flags = [f"- BLOCKED: {exp.id}" for exp, _ in experiments if exp.status == "blocked"] + [
             f"- UNVERIFIED (backfilled): {exp.id}"
             for exp, _ in experiments
             if exp.origin == "backfilled" and not exp.verified
@@ -778,7 +898,7 @@ class Vault:
             shown = attempts[-2:]
             omitted = len(attempts) - len(shown)
             if omitted > 0:
-                lines.append(f"_{omitted} earlier attempt(s) omitted — ask for full history of {exp.id} if needed._")
+                lines.append(f"_{omitted} earlier attempt(s) omitted — ask for full history of {exp.id}._")
             lines.extend(shown)
 
         lines.append("\n## Resources")
@@ -799,7 +919,9 @@ class Vault:
     def _context_for_experiment(self, ident: str) -> str:
         exp, body = parse_page(self._page_path("experiments", ident), Experiment)
         resources = [
-            (p, b) for p, b in load_bucket(self._bucket_dir("resources"), Resource) if p.citekey in exp.resource_refs
+            (p, b)
+            for p, b in load_bucket(self._bucket_dir("resources"), Resource)
+            if p.citekey in exp.resource_refs
         ]
         recent_log = self._recent_log_lines({ident})
 

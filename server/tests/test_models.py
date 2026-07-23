@@ -70,7 +70,8 @@ def test_page_round_trip(tmp_path: Path):
 
 
 def test_render_index_empty():
-    out = render_index("Research", [], sort_key=lambda p: p.updated)
+    no_pages: list[ResearchTopic] = []
+    out = render_index("Research", no_pages, sort_key=lambda p: p.updated)
     assert "_No entries yet._" in out
     assert "do not hand-edit" in out
 

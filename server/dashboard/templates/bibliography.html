@@ -2,15 +2,18 @@
 {% block title %}Bibliography — myphd-tracker{% endblock %}
 {% block content %}
 <h1>Bibliography</h1>
-{% if not resources %}
+{% if not groups %}
 <p class="muted">No resources yet.</p>
 {% endif %}
+{% for group in groups %}
+<h2>{% if group.topic_id %}<a href="topics/{{ group.topic_id }}.html">{{ group.title }}</a>{% else %}{{ group.title }}{% endif %}</h2>
 <ul>
-{% for r in resources %}
+{% for r in group.resources %}
 <li>
   <strong><a href="resources/{{ r.citekey }}.html">{{ r.citekey }}</a></strong> — {{ r.title }}{% if r.authors %} ({{ r.authors|join(", ") }}){% endif %}
   {% if r.tags %}<br><span class="muted">tags: {{ r.tags|join(", ") }}</span>{% endif %}
 </li>
 {% endfor %}
 </ul>
+{% endfor %}
 {% endblock %}

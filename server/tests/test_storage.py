@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from server.models import ExperimentStatus
 from server.storage import AlreadyExists, NotFound, Vault, VaultError
 
 
@@ -118,7 +119,10 @@ def test_update_experiment_rejects_invalid_status_before_writing(vault: Vault):
     exp = vault.start_experiment("Sparse Attention", title="Baseline", aim="...", setup="...")
 
     with pytest.raises(Exception):
-        vault.update_experiment(exp["id"], status="in_progress")
+        # Deliberately invalid at the type level too — this test exists to prove the runtime
+        # guard rejects it; the ignore is for that intentional mismatch, not a real bug.
+        bad_status: ExperimentStatus = "in_progress"  # type: ignore[assignment]
+        vault.update_experiment(exp["id"], status=bad_status)
 
     body = (vault.root / "experiments" / f"{exp['id']}.md").read_text()
     assert "in_progress" not in body
@@ -151,7 +155,11 @@ def test_link_code_sets_code_ref(vault: Vault):
 
 
 def test_add_resource_and_annotate(vault: Vault):
-    vault.add_resource("child2019generating", title="Generating Long Sequences", annotation="Sparse attn origin.")
+    vault.add_resource(
+        "child2019generating",
+        title="Generating Long Sequences",
+        annotation="Sparse attn origin.",
+    )
     vault.annotate_resource("child2019generating", "Re-read section 3.2.")
     body = (vault.root / "resources" / "child2019generating.md").read_text()
     assert "Sparse attn origin." in body
@@ -160,17 +168,125 @@ def test_add_resource_and_annotate(vault: Vault):
     assert "Generating Long Sequences" in index
 
 
+def test_add_resource_with_research_ref_links_directly_to_topic(vault: Vault):
+    vault.start_research("Sparse Attention", aim="...")
+    vault.add_resource(
+        "child2019generating",
+        title="Generating Long Sequences",
+        research_ref="Sparse Attention",
+    )
+    body = (vault.root / "resources" / "child2019generating.md").read_text()
+    assert "research_refs" in body and "sparse-attention" in body
+
+    # shows up in the topic's own context WITHOUT needing an experiment to reference it
+    context = vault.get_context("Sparse Attention")
+    assert "child2019generating" in context
+
+
+def test_add_resource_with_invalid_research_ref_raises(vault: Vault):
+    with pytest.raises(VaultError):
+        vault.add_resource("child2019generating", title="X", research_ref="does not exist")
+    assert not (vault.root / "resources" / "child2019generating.md").exists()
+
+
+def test_link_resource_is_retroactive_and_additive_not_replacing(vault: Vault):
+    vault.start_research("Sparse Attention", aim="...")
+    vault.start_research("Graph Embeddings", aim="...")
+    vault.add_resource("child2019generating", title="Generating Long Sequences")
+
+    result = vault.link_resource("child2019generating", "Sparse Attention")
+    assert result["research_refs"] == ["sparse-attention"]
+
+    result = vault.link_resource("child2019generating", "Graph Embeddings")
+    assert result["research_refs"] == ["sparse-attention", "graph-embeddings"]
+
+    # linking the same topic again must not duplicate
+    result = vault.link_resource("child2019generating", "Sparse Attention")
+    assert result["research_refs"] == ["sparse-attention", "graph-embeddings"]
+
+    assert "child2019generating" in vault.get_context("Sparse Attention")
+    assert "child2019generating" in vault.get_context("Graph Embeddings")
+
+
 def test_resolve_by_alias_and_title_and_bucket_ref(vault: Vault):
     vault.start_research("Sparse Attention", aim="...")
     assert vault.resolve("sparse attention") == ("research", "sparse-attention")
-    assert vault.resolve("research:sparse-attention") == ("research", "sparse-attention")
+    assert vault.resolve("research:sparse-attention") == (
+        "research",
+        "sparse-attention",
+    )
     with pytest.raises(NotFound):
         vault.resolve("does not exist")
 
 
-def test_get_context_for_research_includes_experiments_resources_and_flags(vault: Vault):
+def test_find_similar_topics_matches_close_names_not_unrelated_ones(vault: Vault):
+    vault.start_research("Sparse Attention", aim="...")
+    vault.start_research("Graph Embeddings", aim="...")
+
+    matches = vault.find_similar_topics("sparse attn")
+    assert matches
+    assert matches[0]["id"] == "sparse-attention"
+
+    assert vault.find_similar_topics("something totally unrelated to either topic") == []
+
+
+def test_find_similar_topics_empty_vault_returns_empty(vault: Vault):
+    assert vault.find_similar_topics("anything") == []
+
+
+def test_list_experiments_for_topic_returns_only_linked_experiments(vault: Vault):
+    vault.start_research("Sparse Attention", aim="...")
+    vault.start_research("Graph Embeddings", aim="...")
+    exp = vault.start_experiment("Sparse Attention", title="Baseline", aim="...", setup="...")
+    vault.update_experiment(exp["id"], status="running", attempt_notes="first run")
+
+    results = vault.list_experiments_for_topic("Sparse Attention")
+    assert len(results) == 1
+    assert results[0]["id"] == exp["id"]
+    assert results[0]["status"] == "running"
+    assert results[0]["latest_attempt"] == 1
+
+    assert vault.list_experiments_for_topic("Graph Embeddings") == []
+
+
+def test_list_experiments_for_topic_rejects_non_research_ref(vault: Vault):
+    vault.start_research("Sparse Attention", aim="...")
+    exp = vault.start_experiment("Sparse Attention", title="Baseline", aim="...", setup="...")
+    with pytest.raises(VaultError):
+        vault.list_experiments_for_topic(exp["id"])
+
+
+def test_session_flags_surfaces_blocked_unverified_and_unlinked(vault: Vault):
+    vault.start_research("Sparse Attention", aim="...")
+    exp = vault.start_experiment("Sparse Attention", title="Baseline", aim="...", setup="...")
+    vault.update_experiment(exp["id"], status="blocked", attempt_notes="stuck")
+    vault.add_resource("child2019generating", title="Generating Long Sequences")  # no research_ref
+
+    flags = vault.session_flags()
+    assert flags["blocked"] == [{"id": exp["id"], "title": "Baseline"}]
+    assert flags["unlinked_resources"] == [
+        {"citekey": "child2019generating", "title": "Generating Long Sequences"}
+    ]
+    assert flags["unverified_backfilled"] == []
+
+
+def test_session_flags_empty_vault_returns_empty_lists(vault: Vault):
+    assert vault.session_flags() == {
+        "blocked": [],
+        "unverified_backfilled": [],
+        "unlinked_resources": [],
+    }
+
+
+def test_get_context_for_research_includes_experiments_resources_and_flags(
+    vault: Vault,
+):
     vault.start_research("Sparse Attention", aim="Make attention sub-quadratic.")
-    vault.add_resource("child2019generating", title="Generating Long Sequences", annotation="Origin paper.")
+    vault.add_resource(
+        "child2019generating",
+        title="Generating Long Sequences",
+        annotation="Origin paper.",
+    )
     exp = vault.start_experiment("Sparse Attention", title="Baseline", aim="...", setup="...")
     vault.update_experiment(
         exp["id"],
@@ -179,7 +295,7 @@ def test_get_context_for_research_includes_experiments_resources_and_flags(vault
         metrics=[{"name": "val_ppl", "value": 14.2, "attempt": 1}],
     )
     # link the resource manually via direct page edit to simulate resource_refs
-    from server.models import Experiment, parse_page, dump_page
+    from server.models import Experiment, dump_page, parse_page
 
     path = vault.root / "experiments" / f"{exp['id']}.md"
     model, body = parse_page(path, Experiment)
@@ -199,7 +315,8 @@ def test_get_context_for_research_surfaces_logged_notes_and_findings(vault: Vaul
     vault.start_research("Sparse Attention", aim="Make attention sub-quadratic.")
     vault.log_brainstorm("Sparse Attention", "Maybe top-k works?")
     vault.log_brainstorm(
-        "Sparse Attention", "Deep-research findings: Linformer achieves O(n) via low-rank projection."
+        "Sparse Attention",
+        "Deep-research findings: Linformer achieves O(n) via low-rank projection.",
     )
 
     context = vault.get_context("Sparse Attention")
@@ -270,7 +387,10 @@ def test_weekly_progress_does_not_flag_when_attempt_was_logged(vault: Vault):
     exp = vault.start_experiment("Sparse Attention", title="Baseline", aim="...", setup="...")
     vault.link_code(exp["id"], repo_path=str(repo))
     vault.update_experiment(
-        exp["id"], status="done", attempt_notes="converges", metrics=[{"name": "val_ppl", "value": 10.0, "attempt": 1}]
+        exp["id"],
+        status="done",
+        attempt_notes="converges",
+        metrics=[{"name": "val_ppl", "value": 10.0, "attempt": 1}],
     )
 
     report = vault.weekly_progress()
@@ -296,7 +416,15 @@ def test_weekly_progress_is_structured_not_a_raw_log_dump(vault: Vault):
 
     report = vault.weekly_progress()
 
-    for heading in ("## Summary", "## Research", "## Experiments", "## Resources reviewed", "## Flags for discussion", "## Next steps"):
+    headings = (
+        "## Summary",
+        "## Research",
+        "## Experiments",
+        "## Resources reviewed",
+        "## Flags for discussion",
+        "## Next steps",
+    )
+    for heading in headings:
         assert heading in report
     # raw log.md lines (timestamp + bracketed tag) must not leak into the rendered report
     assert "[research:" not in report
@@ -304,7 +432,9 @@ def test_weekly_progress_is_structured_not_a_raw_log_dump(vault: Vault):
     assert "BLOCKED" in report  # blocked experiment surfaced as a flag, not buried in prose
 
 
-def test_weekly_progress_demotes_headings_inside_notes_to_nest_under_topic(vault: Vault):
+def test_weekly_progress_demotes_headings_inside_notes_to_nest_under_topic(
+    vault: Vault,
+):
     vault.start_research("Sparse Attention", aim="...")
     vault.log_brainstorm("Sparse Attention", "## Deep dive\nSome findings.\n### Sub-point\nmore detail")
 

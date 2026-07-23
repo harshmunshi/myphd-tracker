@@ -41,4 +41,13 @@
   {% endif %}
 </div>
 {% endfor %}
+
+{% if topic.resources %}
+<h2 id="resources">Resources</h2>
+<ul>
+  {% for r in topic.resources %}
+  <li><a href="../resources/{{ r.citekey }}.html">{{ r.title }}</a> <span class="muted">({{ r.citekey }})</span></li>
+  {% endfor %}
+</ul>
+{% endif %}
 {% endblock %}

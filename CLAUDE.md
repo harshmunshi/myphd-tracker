@@ -22,7 +22,16 @@ progress/<week-ending-date>.md  one page per weekly digest, id = ISO date of the
 progress/index.md               GENERATED
 log.md                          single root append-only log, greppable, tags every line by bucket+ref
 dashboard/                      generated static HTML site (build_dashboard output) — never hand-edit
-server/                         the MCP server implementation
+server/                         the MCP server implementation:
+  app.py                          shared state (FastMCP instance, Vault, VAULT_ROOT) — no
+                                   decorators here, just what tools/prompts/resources import
+  tools.py                        @mcp.tool() — atomic actions, one unit of vault work each
+  prompts.py                      @mcp.prompt() — composed, multi-step workflows (see below)
+  resources.py                    @mcp.resource() — read-only, client-pulled data
+  server.py                       thin entrypoint: imports the three above to register them
+  storage.py                      Vault: all I/O, locking, reindexing, alias resolution
+  models.py                       pure frontmatter schemas + parse/dump/render helpers
+  dashboard/                      static-site generator (see Visualizing below)
 ```
 
 **Golden rule: `index.md` files are caches, never sources of truth.** They are always produced by
@@ -112,9 +121,20 @@ authors: []
 tags: []
 origin: live | backfilled
 path_or_url: <str|null>
+research_refs: [<topic-slug>, ...]   # which research topic(s) this belongs to — required for a
+                                      # resource to show up on that topic's own page/get_context
+                                      # rather than only the global, undifferentiated bibliography
 created: YYYY-MM-DD
 ```
 Body: freeform annotation — why this paper matters, what it's cited for.
+
+**The bibliography is per-idea, not one flat list.** Every resource found while researching a
+specific topic must be linked to it via `research_refs` — pass `research_ref` to `add_resource`
+at creation time, or call `link_resource` afterward to attach it retroactively (a resource can
+belong to more than one topic; linking is additive, never replaces existing links). A resource
+with no `research_refs` still exists but only shows up in the bibliography's "Unlinked" group —
+that's a sign it was added without tying it to the topic being worked on, not a valid end state
+for anything found during an actual investigation.
 
 ### Progress report (`progress/<week-ending-date>.md`)
 ```yaml
@@ -164,6 +184,11 @@ just a `grep`:
    ever says "started thinking about X" and never records what was found is not a lab journal,
    it's a to-do list. `get_context` only surfaces what was actually logged this way — findings
    that stay in the chat transcript are invisible to every future session.
+
+   **Any specific paper/dataset that surfaces during that investigation also needs `add_resource`**
+   (with `research_ref` set to the topic), not just a mention inside the `log_research_note` prose.
+   `log_research_note` captures the synthesis; `add_resource` is what makes each source a real,
+   citable bibliography entry scoped to that topic instead of prose the citekey never exists for.
 2. When the user moves to actually writing/running code (Claude Code or any tool) → create an
    `experiments/` page referencing the research topic via `research_refs`. From here on, every
    run/attempt — success or failure — gets appended as a new `### Attempt N` block. Do not wait
@@ -206,6 +231,36 @@ client-side charting library, so it opens fully offline via `file://`. It's a fu
 call (stale pages for renamed/removed topics are deleted, not left behind), so call it any time —
 never hand-edit anything under `dashboard/`. Reach for this when the user wants to browse visually
 rather than read `get_context` in chat.
+
+## MCP primitives: tools vs. prompts vs. resources
+
+Three different jobs, three different primitives — don't blur them:
+
+- **Tools** (`server/tools.py`) are atomic: each does exactly one unit of vault work (create a
+  topic, log a note, start an experiment, add a resource...) and nothing conditional beyond it.
+  The one deliberate exception is that every mutating tool also rebuilds `dashboard/` as part of
+  the same call — that's kept as a code-guaranteed side effect (not a prompt) specifically
+  because relying on an LLM to remember a follow-up call was the exact bug this fixed (stale
+  bibliography/experiment timeline after a real mutation).
+- **Prompts** (`server/prompts.py`) are where multi-step composition and judgment calls live. A
+  prompt is *not* a way to execute tool calls server-side — it's a template that returns text,
+  which the client inserts into the conversation for the calling LLM to then act on by choosing
+  which tools to call. Current prompts:
+  - `start_or_resume_research(topic)` — checks the vault (via `Vault.find_similar_topics`, stdlib
+    `difflib`, no search infra) for an existing match before creating a duplicate topic, working
+    correctly regardless of which chat session raised the question.
+  - `log_code_run(research_ref)` — code activity defaults to an experiment attempt
+    (`start_experiment`/`update_experiment`), never a `log_research_note` prose entry; lists
+    existing experiments (via `Vault.list_experiments_for_topic`) so the LLM can tell new-vs-
+    continuing instead of guessing.
+  - `wrap_up_session()` — a session-end checklist (via `Vault.session_flags`): blocked
+    experiments, unverified backfills, resources never linked to a topic.
+- **Resources** (`server/resources.py`) are read-only, client-pulled data, namespaced under
+  `myphd://` to avoid confusion with the vault's own "Resource" (bibliography) model — an
+  unrelated concept. `myphd://topics` lists every tracked topic; `myphd://topics/{topic_id}`
+  mirrors the `get_context` tool's output. The `get_context` tool stays as-is alongside it —
+  tools are reliably callable by an LLM in an agentic loop regardless of client, resource-read
+  support varies by client, so this is additive, not a replacement.
 
 ## Non-goals
 

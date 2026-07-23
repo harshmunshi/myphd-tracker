@@ -5,9 +5,7 @@ non-goals: no CDN-hosted JS)."""
 from __future__ import annotations
 
 
-def sparkline_svg(
-    values: list[float], width: int = 160, height: int = 36, stroke: str = "#4f8cff"
-) -> str:
+def sparkline_svg(values: list[float], width: int = 160, height: int = 36, stroke: str = "#4f8cff") -> str:
     if not values:
         return ""
     if len(values) == 1:
