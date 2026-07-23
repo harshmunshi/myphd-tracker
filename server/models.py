@@ -125,6 +125,11 @@ class Resource(BaseModel):
     tags: list[str] = Field(default_factory=list)
     origin: Origin = "live"
     path_or_url: Optional[str] = None
+    # Which research topic(s) this resource belongs to — a resource found while brainstorming a
+    # topic (before any experiment exists) has nowhere else to attach, since Experiment.resource_refs
+    # only links resources to experiments. Without this, every resource lands in one undifferentiated
+    # global bibliography regardless of which idea it's actually for.
+    research_refs: list[str] = Field(default_factory=list)
     created: date
 
 

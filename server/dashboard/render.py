@@ -72,16 +72,42 @@ def _build_pages(vault_root: Path, output_dir: Path) -> list[Path]:
     resources = load_bucket(vault_root / "resources", Resource)
     reports = load_bucket(vault_root / "progress", ProgressReport)
 
+    resource_views = [
+        {
+            "citekey": r.citekey,
+            "title": r.title,
+            "authors": r.authors,
+            "tags": r.tags,
+            "path_or_url": r.path_or_url,
+            "research_refs": list(r.research_refs),
+            "annotation_html": _render_md(body),
+        }
+        for r, body in sorted(resources, key=lambda t: t[0].created, reverse=True)
+    ]
+    resource_by_citekey = {r["citekey"]: r for r in resource_views}
+
     experiments_by_topic: dict[str, list[dict]] = {}
+    # Union of resources linked via an experiment's resource_refs AND resources linked directly
+    # to the topic itself — the latter is what lets a paper found while brainstorming (before any
+    # experiment exists) show up on that topic's page instead of only the global bibliography.
+    resource_citekeys_by_topic: dict[str, set[str]] = {}
     for exp, body in experiments:
         view = _experiment_view(exp, body)
         for ref in exp.research_refs:
             experiments_by_topic.setdefault(ref, []).append(view)
+            resource_citekeys_by_topic.setdefault(ref, set()).update(exp.resource_refs)
+    for r in resource_views:
+        for ref in r["research_refs"]:
+            resource_citekeys_by_topic.setdefault(ref, set()).add(r["citekey"])
 
     topic_views = []
     for topic, topic_body in topics:
         exps = sorted(
             experiments_by_topic.get(topic.id, []), key=lambda e: e["updated"], reverse=True
+        )
+        topic_resources = sorted(
+            (resource_by_citekey[ck] for ck in resource_citekeys_by_topic.get(topic.id, set()) if ck in resource_by_citekey),
+            key=lambda r: r["title"],
         )
         aim = extract_section(topic_body, "Aim")
         background = extract_section(topic_body, "Background")
@@ -118,6 +144,8 @@ def _build_pages(vault_root: Path, output_dir: Path) -> list[Path]:
                     "children": [{"label": e["title"], "anchor": f"exp-{e['id']}"} for e in exps],
                 }
             )
+        if topic_resources:
+            toc.append({"label": "Resources", "anchor": "resources"})
 
         topic_views.append(
             {
@@ -129,6 +157,7 @@ def _build_pages(vault_root: Path, output_dir: Path) -> list[Path]:
                 "aim_html": _render_md(aim),
                 "background_html": _render_md(background),
                 "notes": notes,
+                "resources": topic_resources,
                 "experiment_count": len(exps),
                 "experiments": exps,
                 "toc": toc,
@@ -136,17 +165,24 @@ def _build_pages(vault_root: Path, output_dir: Path) -> list[Path]:
         )
     topic_views.sort(key=lambda t: t["updated"], reverse=True)
 
-    resource_views = [
-        {
-            "citekey": r.citekey,
-            "title": r.title,
-            "authors": r.authors,
-            "tags": r.tags,
-            "path_or_url": r.path_or_url,
-            "annotation_html": _render_md(body),
-        }
-        for r, body in sorted(resources, key=lambda t: t[0].created, reverse=True)
-    ]
+    topic_id_to_title = {t["id"]: t["title"] for t in topic_views}
+    for r in resource_views:
+        r["topics"] = [
+            {"id": ref, "title": topic_id_to_title[ref]} for ref in r["research_refs"] if ref in topic_id_to_title
+        ]
+
+    # Bibliography grouped per idea rather than one flat list — a resource with no research_refs
+    # (never linked to a topic) falls into "Unlinked" so it's still findable, not silently dropped.
+    bibliography_groups = []
+    for t in topic_views:
+        group_resources = [r for r in resource_views if t["id"] in r["research_refs"]]
+        if group_resources:
+            bibliography_groups.append(
+                {"title": t["title"], "topic_id": t["id"], "resources": group_resources}
+            )
+    unlinked = [r for r in resource_views if not r["research_refs"]]
+    if unlinked:
+        bibliography_groups.append({"title": "Unlinked", "topic_id": None, "resources": unlinked})
 
     report_views = [
         {
@@ -201,7 +237,12 @@ def _build_pages(vault_root: Path, output_dir: Path) -> list[Path]:
         stale.unlink()
 
     bib_html = _env.get_template("bibliography.html").render(
-        root_prefix="", active=("bibliography", None), page_toc=[], resources=resource_views, **nav
+        root_prefix="",
+        active=("bibliography", None),
+        page_toc=[],
+        groups=bibliography_groups,
+        resources=resource_views,
+        **nav,
     )
     bib_path = output_dir / "bibliography.html"
     atomic_write(bib_path, bib_html)

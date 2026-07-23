@@ -328,12 +328,19 @@ class Vault:
         path_or_url: Optional[str] = None,
         tags: Optional[list[str]] = None,
         annotation: str = "",
+        research_ref: Optional[str] = None,
     ) -> dict:
         with self._lock:
             slug = slugify(citekey)
             path = self._page_path("resources", slug)
             if path.exists():
                 raise AlreadyExists(f"resource {slug!r} already exists")
+            research_refs = []
+            if research_ref:
+                t_bucket, t_ident = self.resolve(research_ref)
+                if t_bucket != "research":
+                    raise VaultError(f"{research_ref!r} is not a research topic")
+                research_refs = [t_ident]
             model = Resource(
                 citekey=slug,
                 title=title,
@@ -341,11 +348,32 @@ class Vault:
                 tags=tags or [],
                 origin="live",
                 path_or_url=path_or_url,
+                research_refs=research_refs,
                 created=dt.date.today(),
             )
             atomic_write(path, dump_page(model, annotation))
-            self._mutate("resources", slug, "added")
+            msg = "added" + (f" — linked to research:{research_refs[0]}" if research_refs else "")
+            self._mutate("resources", slug, msg)
             return {"bucket": "resources", "id": slug}
+
+    def link_resource(self, resource_ref: str, research_ref: str) -> dict:
+        """Retroactively (or additionally) tie an existing resource to a research topic, so it
+        shows up in that topic's own bibliography instead of only the undifferentiated global
+        list. A resource can belong to more than one topic — this appends, it never replaces."""
+        with self._lock:
+            r_bucket, r_ident = self.resolve(resource_ref)
+            if r_bucket != "resources":
+                raise VaultError(f"{resource_ref!r} is not a resource")
+            t_bucket, t_ident = self.resolve(research_ref)
+            if t_bucket != "research":
+                raise VaultError(f"{research_ref!r} is not a research topic")
+            path = self._page_path("resources", r_ident)
+            model, body = parse_page(path, Resource)
+            if t_ident not in model.research_refs:
+                model.research_refs = model.research_refs + [t_ident]
+                atomic_write(path, dump_page(model, body))
+                self._mutate("resources", r_ident, f"linked to research:{t_ident}")
+            return {"bucket": "resources", "id": r_ident, "research_refs": model.research_refs}
 
     def annotate_resource(self, ref: str, note: str) -> dict:
         with self._lock:
@@ -700,10 +728,13 @@ class Vault:
             for p, b in load_bucket(self._bucket_dir("experiments"), Experiment)
             if ident in p.research_refs
         ]
+        all_resources = load_bucket(self._bucket_dir("resources"), Resource)
+        # union of resources linked via an experiment's resource_refs AND resources linked
+        # directly to this topic (the latter is what lets a paper found while brainstorming —
+        # before any experiment exists — still show up here instead of only the global bibliography)
         resource_idents = {r for exp, _ in experiments for r in exp.resource_refs}
-        resources = [
-            (p, b) for p, b in load_bucket(self._bucket_dir("resources"), Resource) if p.citekey in resource_idents
-        ]
+        resource_idents |= {p.citekey for p, _ in all_resources if ident in p.research_refs}
+        resources = [(p, b) for p, b in all_resources if p.citekey in resource_idents]
         refs = {ident} | {exp.id for exp, _ in experiments}
         recent_log = self._recent_log_lines(refs)
 

@@ -29,6 +29,7 @@ def test_expected_tools_are_registered(mcp_env):
         "update_experiment",
         "link_code",
         "add_resource",
+        "link_resource",
         "annotate_resource",
         "get_context",
         "weekly_progress",
@@ -102,6 +103,26 @@ def test_get_context_for_research_reminds_to_log_findings(mcp_env):
     result = asyncio.run(server_module.mcp.call_tool("get_context", {"ref": "sparse attention"}))
     content_blocks, _structured = result
     assert "log_research_note" in content_blocks[0].text
+
+
+def test_mutating_tool_calls_rebuild_dashboard_automatically(mcp_env):
+    server_module, root = mcp_env
+    assert not (root / "dashboard" / "index.html").exists()
+
+    asyncio.run(
+        server_module.mcp.call_tool(
+            "track_research_topic", {"topic": "sparse attention", "aim": "sub-quadratic attention"}
+        )
+    )
+    assert (root / "dashboard" / "index.html").exists()
+    assert (root / "dashboard" / "topics" / "sparse-attention.html").exists()
+
+    asyncio.run(
+        server_module.mcp.call_tool(
+            "add_resource", {"citekey": "child2019generating", "title": "Generating Long Sequences"}
+        )
+    )
+    assert (root / "dashboard" / "resources" / "child2019generating.html").exists()
 
 
 def test_weekly_progress_call_accepts_date_strings_and_persists(mcp_env):
