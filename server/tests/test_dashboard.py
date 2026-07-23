@@ -157,6 +157,25 @@ def test_topic_page_toc_anchors_unique_for_same_day_notes(vault: Vault):
     assert len(set(ids)) == 3  # same-day notes must not collide on one anchor
 
 
+def test_topic_toc_shows_note_titles_not_repeated_dates(vault: Vault):
+    vault.start_research("Graph Embeddings", aim="...")
+    vault.log_brainstorm("Graph Embeddings", "## Deep Research Summary\nSome findings here.")
+    vault.log_brainstorm("Graph Embeddings", "## Graph Asset Inventory\nMore findings.")
+    vault.log_brainstorm("Graph Embeddings", "No heading, just prose that should be truncated as a title.")
+
+    build_dashboard(vault.root)
+
+    topic_page = (vault.root / "dashboard" / "topics" / "graph-embeddings.html").read_text()
+    sidebar_note_labels = re.findall(r'href="#note-[^"]+">([^<]+)</a>', topic_page)
+
+    assert len(sidebar_note_labels) == 3
+    assert len(set(sidebar_note_labels)) == 3  # same-day notes must get distinct sidebar labels
+    assert "Deep Research Summary" in sidebar_note_labels
+    assert "Graph Asset Inventory" in sidebar_note_labels
+    assert any(label.startswith("No heading, just prose") for label in sidebar_note_labels)
+    assert not any(re.fullmatch(r"\d{4}-\d{2}-\d{2}", label) for label in sidebar_note_labels)
+
+
 def test_resource_gets_its_own_page_linked_from_bibliography(vault: Vault):
     vault.add_resource(
         "child2019generating",

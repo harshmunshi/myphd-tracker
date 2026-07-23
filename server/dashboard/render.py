@@ -42,6 +42,21 @@ def _render_md(text: str) -> str:
     return _md.render(text) if text else ""
 
 
+def _note_title(raw_note: str, fallback: str) -> str:
+    """A note's own `### <date>` heading isn't a useful sidebar label on its own — several notes
+    logged the same day all show the identical date otherwise. Use the first heading/line of
+    actual content instead (a deep-research pass note typically opens with its own `## <topic>`
+    heading right after the date); fall back to the date only when there's nothing to go on."""
+    for line in raw_note.splitlines()[1:]:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        heading = re.match(r"#{1,6}\s+(.+)", stripped)
+        text = heading.group(1).strip() if heading else stripped
+        return text if len(text) <= 60 else text[:59].rstrip() + "…"
+    return fallback
+
+
 def _experiment_view(exp: Experiment, body: str) -> dict:
     by_name: dict[str, list[tuple[int, float]]] = {}
     for m in extract_metrics(body):
@@ -116,13 +131,13 @@ def _build_pages(vault_root: Path, output_dir: Path) -> list[Path]:
         for i, raw_note in enumerate(reversed(extract_dated_notes(topic_body))):
             date_match = re.match(r"### (\d{4}-\d{2}-\d{2})", raw_note)
             date = date_match.group(1) if date_match else "note"
-            # index-suffixed so same-day notes (a topic can get several in one session) don't
-            # collide on a shared #note-<date> anchor — the label stays the plain date, only
-            # the anchor needs to be unique.
             notes.append(
                 {
+                    # index-suffixed so same-day notes (a topic can get several in one session)
+                    # don't collide on a shared #note-<date> anchor.
                     "anchor": f"note-{i}-{date}",
                     "date": date,
+                    "title": _note_title(raw_note, fallback=date),
                     "html": _render_md(raw_note),
                 }
             )
@@ -140,7 +155,7 @@ def _build_pages(vault_root: Path, output_dir: Path) -> list[Path]:
                 {
                     "label": "Notes",
                     "anchor": "notes",
-                    "children": [{"label": n["date"], "anchor": n["anchor"]} for n in notes],
+                    "children": [{"label": n["title"], "anchor": n["anchor"]} for n in notes],
                 }
             )
         if exps:
